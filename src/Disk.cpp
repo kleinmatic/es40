@@ -568,6 +568,7 @@ void CDisk::scsi_xfer_done_me(int bus)
 
 //  SCSI block device commands:
 #define SCSIBLOCKCMD_READ_CAPACITY  0x25
+#define SCSIBLOCKCMD_SEEK           0x2B
 
 //  SCSI CD-ROM commands:
 #define SCSICDROM_READ_SUBCHANNEL  0x42
@@ -1679,6 +1680,18 @@ int CDisk::do_scsi_command()
 		}
 
 		// ignore it...
+		do_scsi_error(SCSI_OK);
+		break;
+	}
+
+	case SCSIBLOCKCMD_SEEK:
+	{
+		auto ofs = (state.scsi.cmd.data[2] << 24) + (state.scsi.cmd.data[3] << 16) + (state.scsi.cmd.data[4] << 8) + state.scsi.cmd.data[5];
+		if (ofs >= get_lba_size()) {
+			do_scsi_error(SCSI_LBA_RANGE);
+			break;
+		}
+		seek_block(ofs);
 		do_scsi_error(SCSI_OK);
 		break;
 	}
