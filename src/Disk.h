@@ -107,7 +107,7 @@ public:
 
   int             do_scsi_command();
   int             do_scsi_message();
-  void            do_scsi_error(int errcode);
+  void            do_scsi_error(int errcode, int info = 0);
 
   virtual bool    seek_byte(off_t_large byte) = 0;
   virtual size_t  read_bytes(void* dest, size_t bytes) = 0;

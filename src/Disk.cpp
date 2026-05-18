@@ -612,8 +612,9 @@ void CDisk::scsi_xfer_done_me(int bus)
 #define SCSI_INVALID_FIELD			- 4 /* Invalid field in CDB */
 #define SCSI_MEDIA_CHANGE           - 5 /* Media changed */
 #define SCSI_MEDIA_REMOVED          - 6 /* Media removed */
+#define SCSI_INVALID_LUN            - 7 /* Invalid LUN */
 
-void CDisk::do_scsi_error(int errcode)
+void CDisk::do_scsi_error(int errcode, int info)
 {
 	state.scsi.stat.available = 1;
 	state.scsi.stat.data[0] = 0;
@@ -633,10 +634,10 @@ void CDisk::do_scsi_error(int errcode)
 	state.scsi.stat.data[0] = 0x02;       // check sense
 	state.scsi.sense.data[0] = 0xf0;      // error code
 	state.scsi.sense.data[1] = 0x00;      // segment number
-	state.scsi.sense.data[3] = 0x00;      // info
-	state.scsi.sense.data[4] = 0x00;
-	state.scsi.sense.data[5] = 0x00;
-	state.scsi.sense.data[6] = 0x00;
+	state.scsi.sense.data[3] = info >> 24;      // info
+	state.scsi.sense.data[4] = info >> 16;
+	state.scsi.sense.data[5] = info >> 8;
+	state.scsi.sense.data[6] = info & 0xFF;
 	state.scsi.sense.data[7] = 10;        // additional sense length
 	state.scsi.sense.data[8] = 0x00;      // command specific
 	state.scsi.sense.data[9] = 0x00;
@@ -669,6 +670,14 @@ void CDisk::do_scsi_error(int errcode)
 #endif
 		break;
 
+	case SCSI_INVALID_LUN:
+		state.scsi.sense.data[2] = 0x05;   // ILLEGAL REQUEST
+		state.scsi.sense.data[12] = 0x25;   // INVALID LUN
+		state.scsi.sense.data[13] = 0x00;
+#if defined(DEBUG_SCSI)
+		printf("%s: Check sense: INVALID LUN.\n", devid_string);
+#endif
+		break;
 
 	case SCSI_LBA_RANGE:
 		state.scsi.sense.data[2] = 0x05;    // illegal request
@@ -921,7 +930,8 @@ int CDisk::do_scsi_command()
 	if (state.scsi.lun_selected && state.scsi.cmd.data[0] != SCSICMD_INQUIRY
 		&& state.scsi.cmd.data[0] != SCSICMD_REQUEST_SENSE)
 	{
-		FAILURE_1(NotImplemented, "%s: LUN not supported!\n", devid_string);
+		do_scsi_error(SCSI_INVALID_FIELD, state.scsi.cmd.data[1] >> 5);
+		return 0;
 	}
 
 	switch (state.scsi.cmd.data[0])
@@ -1163,6 +1173,170 @@ int CDisk::do_scsi_command()
 		printf("\n");
 #endif
 		do_scsi_error(SCSI_OK);
+	}
+	break;
+
+	// Also from Bochs.
+	case 0x46: // get configuration (mmc4r05a.pdf, page 286) (pages are physical pdf pages, not page numbers listed on specific page)
+	{
+		//                Bit8u rt = (state.scsi.dati.data[1] & (3<<0));
+		if (!cdrom())
+		{
+			do_scsi_error(SCSI_ILL_CMD);
+			break;
+		}
+		uint16_t start_feature = read_16bit(state.scsi.cmd.data + 2);
+		uint16_t alloc_length = read_16bit(state.scsi.cmd.data + 7);
+		uint8_t *feature_ptr = state.scsi.dati.data;
+		bool inserted = true;
+
+		// The controller buffer is guaranteed to be at least 2048 bytes.
+		// The largest return for this command is guaranteed to be less than 1024 bytes.
+		// Therefore, we just build the return as if requested all bytes,
+		//  then only return up to 'alloc_length' bytes.
+
+		if (alloc_length >= 8)
+		{
+			// create a header (page 287)
+			// state.scsi.dati.data[0] = 0;  // length is calculated below
+			// state.scsi.dati.data[1] = 0;
+			// state.scsi.dati.data[2] = 0;
+			// state.scsi.dati.data[3] = 0;
+			state.scsi.dati.data[4] = 0; // reserved
+			state.scsi.dati.data[5] = 0; // reserved
+			state.scsi.dati.data[6] = 0; // we only support profile 8 (cd-rom)
+			state.scsi.dati.data[7] = 8; //
+			feature_ptr += 8;
+
+			// page: 238
+			// Profile 8 requires feature numbers, 0x0, 0x1, 0x2, 0x3, 0x10, 0x1E, 0x100, 0x105
+
+			// profile list (feature 0x0000) (mmc4r05a.pdf, page 174)
+			if (start_feature == 0x0000)
+			{
+				feature_ptr[0] = 0x00; // Feature Code 0x000
+				feature_ptr[1] = 0x00;
+				feature_ptr[2] = (0 << 6) | (0 << 2) | (1 << 1) | (inserted << 0); // version 1, persistent = 1, current = 1 if inserted
+				feature_ptr[3] = 4;												   // additional length = (1 * 4)
+				feature_ptr[4] = 0x00;											   // profile 0x0008
+				feature_ptr[5] = 0x08;											   //
+				feature_ptr[6] = (0 << 1) | (inserted << 0);					   // reserved, Current = 1 if inserted
+				feature_ptr[7] = 0;												   // reserved
+				feature_ptr += 8;
+			}
+
+			// core feature (feature 0x0001) (mmc4r05a.pdf, page 174)
+			if (start_feature <= 0x0001)
+			{
+				feature_ptr[0] = 0x00; // Feature Code 0x001
+				feature_ptr[1] = 0x01;
+				feature_ptr[2] = (0 << 6) | (1 << 2) | (1 << 1) | (1 << 0); // version 1, persistent = 1, current = 1
+				feature_ptr[3] = 8;											// additional length = 8
+				feature_ptr[4] = 0;											// physical interface standard:
+				feature_ptr[5] = 0;											//   2 = ATAPI
+				feature_ptr[6] = 0;											//
+				feature_ptr[7] = 2;											//
+				feature_ptr[8] = (0 << 1) | (0 << 0);						// reserved, DBE = 0
+				feature_ptr[9] = 0;											//
+				feature_ptr[10] = 0;										//
+				feature_ptr[11] = 0;										//
+				feature_ptr += 12;
+			}
+
+			// morphing feature (feature 0x0002) (mmc4r05a.pdf, page 178)
+			if (start_feature <= 0x0002)
+			{
+				feature_ptr[0] = 0x00; // Feature Code 0x002
+				feature_ptr[1] = 0x02;
+				feature_ptr[2] = (0 << 6) | (1 << 2) | (1 << 1) | (1 << 0); // version 1, persistent = 1, current = 1
+				feature_ptr[3] = 4;											// additional length = 4
+				feature_ptr[4] = (0 << 1) | (0 << 0);						// OCEvent = 0 (see page 178), ASYNC = 0 (0 = polling of EVENT STATUS NOTIFICATION)
+				feature_ptr[5] = 0;											//
+				feature_ptr[6] = 0;											//
+				feature_ptr[7] = 0;											//
+				feature_ptr += 8;
+			}
+
+			// Removable Medium feature (feature 0x0003) (mmc4r05a.pdf, page 179)
+			if (start_feature <= 0x0003)
+			{
+				feature_ptr[0] = 0x00; // Feature Code 0x003
+				feature_ptr[1] = 0x03;
+				feature_ptr[2] = (0 << 6) | (0 << 2) | (1 << 1) | (1 << 0); // version 0, persistent = 1, current = 1
+				feature_ptr[3] = 4;											// additional length = 4
+				feature_ptr[4] = (0 << 5)									// Loading Mech type: 0
+								 | (0 << 3)									// No Eject Mech
+								 | (1 << 2)									// No Pvnt Jumper
+								 | (0 << 0);								// Lock = 0 (no locking mechanism)
+				feature_ptr[5] = 0;											//
+				feature_ptr[6] = 0;											//
+				feature_ptr[7] = 0;											//
+				feature_ptr += 8;
+			}
+
+			// Random Readable feature (feature 0x0010) (mmc4r05a.pdf, page 182)
+			if (start_feature <= 0x0010)
+			{
+				feature_ptr[0] = 0x00; // Feature Code 0x010
+				feature_ptr[1] = 0x10;
+				feature_ptr[2] = (0 << 6) | (0 << 2) | (1 << 1) | (1 << 0); // version 0, persistent = 1, current = 1
+				feature_ptr[3] = 8;											// additional length = 8
+				feature_ptr[4] = 0x00;										// Logical Block Size:
+				feature_ptr[5] = 0x00;										//   2048 (0x800)
+				feature_ptr[6] = 0x08;										//
+				feature_ptr[7] = 0x00;										//
+				feature_ptr[8] = (16 >> 8);				// blocking
+				feature_ptr[9] = (16 & 0xFF);
+				feature_ptr[10] = (0 << 0); // PP = 0
+				feature_ptr[11] = 0;
+				feature_ptr += 12;
+			}
+
+			// CD Read feature (feature 0x001E) (mmc4r05a.pdf, page 185)
+			if (start_feature <= 0x001E)
+			{
+				feature_ptr[0] = 0x00; // Feature Code 0x01E
+				feature_ptr[1] = 0x1E;
+				feature_ptr[2] = (0 << 6) | (2 << 2) | (1 << 1) | (1 << 0); // version 2, persistent = 1, current = 1
+				feature_ptr[3] = 4;											// additional length = 4
+				feature_ptr[4] = (0 << 7) | (0 << 1) | (0 << 0);			// DAP = 0, C2 Flags = 0, CD-Text = 0
+				feature_ptr[5] = 0;
+				feature_ptr[6] = 0;
+				feature_ptr[7] = 0;
+				feature_ptr += 8;
+			}
+
+			// Timeout feature (feature 0x0105) (mmc4r05a.pdf, page 222)
+			if (start_feature <= 0x0105)
+			{
+				feature_ptr[0] = 0x01; // Feature Code 0x105
+				feature_ptr[1] = 0x05;
+				feature_ptr[2] = (0 << 6) | (1 << 2) | (1 << 1) | (1 << 0); // version 1, persistent = 1, current = 1
+				feature_ptr[3] = 4;											// additional length = 4
+				feature_ptr[4] = (0 << 0);									// Group 3 = 0
+				feature_ptr[5] = 0;
+				feature_ptr[6] = 0;
+				feature_ptr[7] = 0;
+				feature_ptr += 8;
+			}
+
+			// update the return length
+			// The Data Length field indicates the amount of data available given a sufficient allocation length following this field.
+			// This length shall not be truncated due to an insufficient Allocation Length.
+			uint16_t return_length = (uint16_t)(feature_ptr - state.scsi.dati.data) - 4;
+			state.scsi.dati.data[0] = 0;
+			state.scsi.dati.data[1] = 0;
+			state.scsi.dati.data[2] = (return_length >> 8);
+			state.scsi.dati.data[3] = (return_length & 0xFF);
+
+			/* Bochs used this because of ReactOS boot problems, but this should be in fact correct. */
+			state.scsi.dati.available = return_length + 4;
+			state.scsi.dati.read = 0;
+		}
+		else
+		{
+			do_scsi_error(SCSI_INVALID_FIELD);
+		}
 	}
 	break;
 
