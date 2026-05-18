@@ -990,7 +990,8 @@ int main(int argc, char* argv[])
 				int i = 1;
 				for (d = alldevs; d; d = d->next)
 				{
-					if_q.addAnswer(i2s(i), d->name, string(d->name) + "(" + string(d->description) + ")");
+					const char* description = d->description ? d->description : "No description available";
+					if_q.addAnswer(i2s(i), d->name, string(d->name) + " (" + description + ")");
 					i++;
 				}
 			}
