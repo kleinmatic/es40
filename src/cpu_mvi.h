@@ -247,24 +247,19 @@ static __forceinline u64     es40_storeq(__m128i v) { return (u64)_mm_cvtsi128_s
 #endif
 
 #if defined(ES40_HAVE_SSE2)
+/* PERR: scalar sum of 8 *unsigned* byte absolute differences (HRM 4.13.3). */
 #define DO_PERR do { \
-    __m128i a8  = es40_loadq(state.r[REG_1]); \
-    __m128i b8  = es40_loadq(V_2);            \
-    __m128i a16 = _mm_unpacklo_epi8(a8, _mm_cmpgt_epi8(_mm_setzero_si128(), a8)); \
-    __m128i b16 = _mm_unpacklo_epi8(b8, _mm_cmpgt_epi8(_mm_setzero_si128(), b8)); \
-    __m128i d16 = _mm_sub_epi16(a16, b16); \
-    __m128i sgn = _mm_srai_epi16(d16, 15); \
-    __m128i abs16 = _mm_sub_epi16(_mm_xor_si128(d16, sgn), sgn); \
-    __m128i res8  = _mm_packus_epi16(abs16, _mm_setzero_si128()); \
-    state.r[REG_3] = es40_storeq(res8); \
+    __m128i a = es40_loadq(state.r[REG_1]); \
+    __m128i b = es40_loadq(V_2);            \
+    state.r[REG_3] = es40_storeq(_mm_sad_epu8(a, b)); \
   } while (0)
 #else
 #define DO_PERR do { \
     temp_64 = 0; temp_64_1 = state.r[REG_1]; temp_64_2 = V_2; \
     for (i = 0; i < 64; i += 8) { \
-      s8 a = (s8)((temp_64_1 >> i) & X64_BYTE), b = (s8)((temp_64_2 >> i) & X64_BYTE); \
-      u8 d = (u8)((a > b) ? (a - b) : (b - a)); \
-      temp_64 |= (u64)d << i; \
+      u8 a = (u8)((temp_64_1 >> i) & X64_BYTE); \
+      u8 b = (u8)((temp_64_2 >> i) & X64_BYTE); \
+      temp_64 += (a > b) ? (a - b) : (b - a); \
     } \
     state.r[REG_3] = temp_64; \
   } while (0)

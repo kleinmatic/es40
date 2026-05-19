@@ -886,8 +886,9 @@ u64 CAlphaCPU::ieee_rpack(UFP* r, u32 ins, u32 dp)
 
 	if (r->exp <= expmin[dp])
 	{ /* underflow? */
-		ieee_trap(TRAP_UNF, ins & I_FTRP_U, /* set underflow trap */
-			(state.fpcr & FPCR_UNDZ) ? FPCR_UNFD : 0, ins); /* (dsbl only if UNFZ set) */
+		/* UNFD (with /S) disables the underflow trap; UNDZ separately controls
+		   flush-to-zero result. The two bits are independent per HRM 4.7.7.1. */
+		ieee_trap(TRAP_UNF, ins & I_FTRP_U, FPCR_UNFD, ins);
 		ieee_trap(TRAP_INE, Q_SUI(ins), FPCR_INED, ins);          /* set inexact */
 		return 0;
 	} /* underflow to +0 */

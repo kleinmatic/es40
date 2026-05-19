@@ -186,19 +186,21 @@
   { int c = vax_fcmp(state.f[FREG_1], state.f[FREG_2], ins); \
     state.f[FREG_3] = (c < 0) ? U64(0x4000000000000000) : 0; }
 
+/* CMPTEQ/CMPTLT/CMPTLE are signaling: any NaN input raises INV (HRM 4.10.7.5). */
 #define DO_CMPTEQ FPSTART; \
-  { int c = ieee_fcmp(state.f[FREG_1], state.f[FREG_2], ins, 0); \
+  { int c = ieee_fcmp(state.f[FREG_1], state.f[FREG_2], ins, 1); \
     state.f[FREG_3] = (c == 0) ? U64(0x4000000000000000) : 0; }
 
 #define DO_CMPTLE FPSTART; \
-  { int c = ieee_fcmp(state.f[FREG_1], state.f[FREG_2], ins, 0); \
+  { int c = ieee_fcmp(state.f[FREG_1], state.f[FREG_2], ins, 1); \
     state.f[FREG_3] = (c <= 0) ? U64(0x4000000000000000) : 0; }
 
 #define DO_CMPTLT FPSTART; \
-  { int c = ieee_fcmp(state.f[FREG_1], state.f[FREG_2], ins, 0); \
+  { int c = ieee_fcmp(state.f[FREG_1], state.f[FREG_2], ins, 1); \
     state.f[FREG_3] = (c < 0) ? U64(0x4000000000000000) : 0; }
 
-/* CMPTUN now works correctly since ieee_fcmp returns 2 for unordered */
+/* CMPTUN is quiet: only sNaN raises INV (handled inside ieee_unpack via the
+   QNAN-bit check). qNaN inputs return TRUE without raising. */
 #define DO_CMPTUN FPSTART; \
   { int c = ieee_fcmp(state.f[FREG_1], state.f[FREG_2], ins, 0); \
     state.f[FREG_3] = (c == 2) ? U64(0x4000000000000000) : 0; }
