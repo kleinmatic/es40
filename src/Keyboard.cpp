@@ -368,7 +368,7 @@ void CKeyboard::resetinternals(bool powerup)
 	// Default scancode set is mf2 (translation is controlled by the 8042)
 	state.expecting_scancodes_set = 0;
 
-	state.current_scancodes_set = 1; // startup in set 2
+	state.current_scancodes_set = 2; // startup in set 2
 
 	if (powerup)
 	{
