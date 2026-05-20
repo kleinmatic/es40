@@ -491,11 +491,17 @@ inline u64 fsqrt64(u64 asig, s32 exp)
   {                                                                             \
     u64 _dpc_va = (addr);                                                       \
     if (((flags) & ~ACCESS_WRITE) == 0) {                                       \
-      /* Normal read/write — try data page cache */                             \
+      /* Normal read/write — try data page cache. The hit must match the      \
+         current mode (cm) and data ASN (asn0): a hit bypasses virt2phys, so   \
+         the per-mode protection check and ASN tag are only safe to skip when  \
+         both are unchanged from fill time (HRM: protection is per-mode, per   \
+         address space). */                                                     \
       int _dpc_rw = (flags) & ACCESS_WRITE;                                     \
       u64 _dpc_vp = _dpc_va & ~U64(0x1FFF);                                     \
       if (data_page_cache[_dpc_rw].valid                                        \
-          && data_page_cache[_dpc_rw].virt_page == _dpc_vp) {                   \
+          && data_page_cache[_dpc_rw].virt_page == _dpc_vp                      \
+          && data_page_cache[_dpc_rw].cm  == state.cm                          \
+          && data_page_cache[_dpc_rw].asn == state.asn0) {                      \
         phys_address = data_page_cache[_dpc_rw].phys_base                       \
                      | (_dpc_va & U64(0x1FFF));                                 \
       } else {                                                                  \
@@ -503,6 +509,8 @@ inline u64 fsqrt64(u64 asig, s32 exp)
           ES40_EXECUTE_END();                                                   \
         data_page_cache[_dpc_rw].virt_page = _dpc_vp;                           \
         data_page_cache[_dpc_rw].phys_base = phys_address & ~U64(0x1FFF);       \
+        data_page_cache[_dpc_rw].cm        = state.cm;                          \
+        data_page_cache[_dpc_rw].asn       = state.asn0;                        \
         data_page_cache[_dpc_rw].valid     = true;                              \
       }                                                                         \
     } else {                                                                    \

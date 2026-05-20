@@ -459,11 +459,13 @@ private:
     seq_remaining = 0;
   }
   
-  // Data page translation cache 
+  // Data page translation cache
   // Caches last data virt->phys translation per read/write.
   struct SDataPageCache {
     u64  virt_page;   // va & ~0x1FFF
     u64  phys_base;   // pa & ~0x1FFF
+    int  cm;          // current mode (CM) at fill time
+    int  asn;         // data ASN (asn0) at fill time
     bool valid;
   } data_page_cache[2];  // [0]=read, [1]=write
 
