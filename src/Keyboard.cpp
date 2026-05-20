@@ -1,8 +1,7 @@
 /* ES40 emulator.
  * Copyright (C) 2007-2008 by the ES40 Emulator Project
  *
- * WWW    : http://www.es40.org
- * E-mail : camiel@es40.org
+ * WWW    : https://github.com/gdwnldsKSC/es40
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -369,10 +368,8 @@ void CKeyboard::resetinternals(bool powerup)
 	// Default scancode set is mf2 (translation is controlled by the 8042)
 	state.expecting_scancodes_set = 0;
 
-	//state.current_scancodes_set = 1;
-	state.current_scancodes_set = 2;
+	state.current_scancodes_set = 1; // startup in set 2
 
-	//state.scancodes_translate = 1;
 	if (powerup)
 	{
 		state.kbd_internal_buffer.expecting_led_write = 0;
