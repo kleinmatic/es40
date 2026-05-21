@@ -2395,6 +2395,10 @@ void CSystem::interrupt(int number, bool assert)
 {
 	int i;
 
+	// Serialize drir RMW + delivery against other device threads; irq_h() is
+	// lock-free and never re-enters here, so this is deadlock-free.
+	std::lock_guard<std::mutex> drirGuard(drir_lock);
+
 	if (number == -1)
 	{
 

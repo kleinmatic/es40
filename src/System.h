@@ -147,6 +147,7 @@
 #include "TraceEngine.h"
 #include "i2c_spd.h"
 #include <atomic>
+#include <mutex>
 
 #if !defined(INCLUDED_SYSTEM_H)
 #define INCLUDED_SYSTEM_H
@@ -311,6 +312,10 @@ private:
 
   int           iNumCPUs;
   CFastMutex* cpu_lock_mutex;
+
+  // Serializes drir RMW + delivery in interrupt() across device threads. On
+  // CSystem (not in saved 'state'), so SaveState is unaffected.
+  std::mutex    drir_lock;
 
   /// The state structure contains all elements that need to be saved to the statefile.
   struct SSys_state
