@@ -2882,8 +2882,17 @@ void CSym53C810::eval_interrupts()
 		SB_R8(ISTAT, DIP, false);
 	}
 
-	// Check for SCSI engine interrupts
-	if (R8(SIST0) || R8(SIST1))
+	// Check for SCSI engine interrupts.
+	//
+	// Per the SYM53C810A data manual (Interrupt Handling / Masking): a
+	// masked non-fatal interrupt (CMP/SEL/RSL/GEN/HTH in initiator role)
+	// posts its bit in SIST0/SIST1 but must NOT set SIP, assert IRQ/, or
+	// cause interrupt stacking. Only a fatal interrupt -- or a non-fatal one
+	// enabled in SIEN0/SIEN1 -- sets SIP. Gating SIP on the raw SIST bits
+	// latched SIP on a masked GEN timer, after which every later completion
+	// interrupt stacked behind it and was never delivered to the host.
+	if ((R8(SIST0) & (SIST0_FATAL | R8(SIEN0)))
+		|| (R8(SIST1) & (SIST1_FATAL | R8(SIEN1))))
 	{
 		// Set the SCSI interrupt pending bit.
 		SB_R8(ISTAT, SIP, true);
