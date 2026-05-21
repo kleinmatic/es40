@@ -791,7 +791,13 @@ int CAlphaCPU::ieee_unpack(u64 op, UFP* r, u32 ins)
 
 		r->frac = r->frac << FPR_GUARD; /* guard fraction */
 		ieee_norm(r); /* normalize dnorm */
-		ieee_trap(TRAP_INV, 1, FPCR_INVD, ins); /* signal inv op */
+		/* Denormal input operands take an *unmaskable* trap when
+		   FPCR[DNZ] is clear (HRM A.11: "denormal input operands for
+		   arithmetic operations produce an unmaskable denormal trap").
+		   Pass fpcrdsb = 0 so neither the /S qualifier nor FPCR[INVD]
+		   can suppress it -- same idiom as the unmaskable integer-
+		   overflow trap in ieee_cvtfi(). */
+		ieee_trap(TRAP_INV, 1, 0, ins); /* signal denormal-operand trap */
 		return UFT_DENORM;
 	}
 
