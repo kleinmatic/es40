@@ -2087,6 +2087,71 @@ void CAliM1543C::pic_deassert(int index, int intno)
 	pic_deassert_inner(index, intno);
 }
 
+/**
+ * Drive a device IRQ input line to a level (active/inactive) — the model for
+ * sources whose "interrupt" is a level the device holds until the guest clears
+ * the cause.
+ *
+ * Because the source is a level, IRR FOLLOWS the line: a rising edge latches
+ * IRR (debounced via last_irr so a held line yields one interrupt), and a
+ * falling line RETRACTS IRR.  This intentionally differs from a stock 8259 
+ * which keeps an edge latched until INTA: a real 8259 has a wire whose source 
+ * holds it, but here the "wire" IS the output-buffer level and once the guest 
+ * empties the buffer there is nothing left to deliver.
+ * 
+ * caller must hold picLock 
+ **/
+void CAliM1543C::pic_set_line_inner(int index, int intno, bool active)
+{
+	const u8 mask = (u8)(1 << intno);
+
+	if ((state.pic_elcr[index] & mask) || state.pic_ltim[index])
+	{
+		// Level triggered: IRR follows the input line.
+		if (active)
+		{
+			state.pic_irr[index]      |= mask;
+			state.pic_last_irr[index] |= mask;
+		}
+		else
+		{
+			state.pic_irr[index]      &= ~mask;
+			state.pic_last_irr[index] &= ~mask;
+		}
+	}
+	else
+	{
+		// Edge triggered: latch IRR only on the rising edge.  IRR is cleared at
+		// INTA, not here, so re-driving a held line produces no duplicate edge.
+		if (active)
+		{
+			if ((state.pic_last_irr[index] & mask) == 0)
+				state.pic_irr[index] |= mask;
+			state.pic_last_irr[index] |= mask;
+		}
+		else
+		{
+			// Line low — the output buffer emptied (normal read, drained read,
+			// or poll), so there is nothing left to deliver: retract the latched
+			// edge.  A stock 8259 keeps it until INTA, but here the line IS the
+			// buffer level.  
+			state.pic_irr[index]      &= ~mask;
+			state.pic_last_irr[index] &= ~mask;
+		}
+	}
+
+	pic_update_output(index);
+}
+
+/**
+ * Drive a device IRQ input line — locked wrapper, see pic_set_line_inner.
+ **/
+void CAliM1543C::pic_set_line(int index, int intno, bool active)
+{
+	CFastMutex::ScopedLock guard(picLock);
+	pic_set_line_inner(index, intno, active);
+}
+
 static u32  ali_magic1 = 0xA111543C;
 static u32  ali_magic2 = 0xC345111A;
 

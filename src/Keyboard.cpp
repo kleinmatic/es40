@@ -408,11 +408,9 @@ void CKeyboard::enQ(u8 scancode)
 	state.kbd_internal_buffer.buffer[tail] = scancode;
 	state.kbd_internal_buffer.num_elements++;
 
-	if (!state.status.outb && state.kbd_clock_enabled)
-	{
-		state.timer_pending = 1;
-		return;
-	}
+	// Event-driven: deliver to the output buffer now (if free) and drive the
+	// IRQ, instead of waiting for the 20ms poll. 
+	kbd_service();
 }
 
 /**
@@ -449,9 +447,10 @@ u8 CKeyboard::read_60()
 			state.kbd_controller_Qsize--;
 		}
 
-		//DEV_pic_lower_irq(12);
-		state.timer_pending = 1;
-		execute();
+		// Refill the output buffer from the queues and re-evaluate the IRQ
+		// lines (kbd_service drops the line for the byte just read, then raises
+		// a fresh edge if another byte is now pending
+		kbd_service();
 #ifdef DEBUG_KBD
 		BX_DEBUG(("[mouse] read from 0x60 returns 0x%02x", val));
 #endif
@@ -486,9 +485,8 @@ u8 CKeyboard::read_60()
 			state.kbd_controller_Qsize--;
 		}
 
-		//      DEV_pic_lower_irq(1);
-		state.timer_pending = 1;
-		execute();
+		// Refill from the queues and re-evaluate the IRQ lines.
+		kbd_service();
 #ifdef DEBUG_KBD
 		BX_DEBUG(("READ(60) = %02x", (unsigned)val));
 #endif
@@ -1635,109 +1633,8 @@ void CKeyboard::mouse_enQ(u8 mouse_data)
 	state.mouse_internal_buffer.buffer[tail] = mouse_data;
 	state.mouse_internal_buffer.num_elements++;
 
-	if (!state.status.outb && state.aux_clock_enabled)
-	{
-		state.timer_pending = 1;
-		return;
-	}
-}
-
-/**
- * Determine what IRQ's need to be asserted.
- **/
-unsigned CKeyboard::periodic()
-{
-	u8  retval;
-
-	retval = (state.irq1_requested << 0) | (state.irq12_requested << 1);
-	state.irq1_requested = 0;
-	state.irq12_requested = 0;
-
-	if (state.status.outb)
-	{
-		// Like a real 8042 - IRQ1 level-triggered, held
-		// asserted as long as state.status.outb is set.
-		if (state.allow_irq1 && !state.status.auxb)
-			retval |= 0x01;
-		else if (state.allow_irq12 && state.status.auxb)
-			retval |= 0x02;
-
-		if (state.mouse_internal_buffer.num_elements > 0
-			|| state.kbd_internal_buffer.num_elements > 0
-			|| state.kbd_controller_Qsize > 0)
-			state.timer_pending = 1;
-		return(retval);
-	}
-
-	if (state.timer_pending == 0)
-	{
-		return(retval);
-	}
-
-	if (1 >= state.timer_pending)
-	{
-		state.timer_pending = 0;
-	}
-	else
-	{
-		state.timer_pending--;
-		return(retval);
-	}
-
-	/* nothing in outb, look for possible data xfer from keyboard or mouse */
-	if (state.kbd_internal_buffer.num_elements
-		&& (state.kbd_clock_enabled || state.bat_in_progress))
-	{
-#ifdef DEBUG_KBD
-		BX_DEBUG(("service_keyboard: key in internal buffer waiting"));
-#endif
-		state.kbd_output_buffer = state.kbd_internal_buffer.buffer[state.kbd_internal_buffer.head];
-		state.status.outb = 1;
-
-		// commented out since this would override the current state of the
-		// mouse buffer flag - no bug seen - just seems wrong (das)
-		//    state.auxb = 0;
-		state.kbd_internal_buffer.head = (state.kbd_internal_buffer.head + 1) % BX_KBD_ELEMENTS;
-		state.kbd_internal_buffer.num_elements--;
-		if (state.allow_irq1)
-			state.irq1_requested = 1;
-	}
-	else
-	{
-		create_mouse_packet(0);
-		if (state.aux_clock_enabled && state.mouse_internal_buffer.num_elements)
-		{
-#ifdef DEBUG_KBD
-			BX_DEBUG(("service_keyboard: key(from mouse) in internal buffer waiting"));
-#endif
-			state.aux_output_buffer = state.mouse_internal_buffer.buffer[state.mouse_internal_buffer.head];
-
-			state.status.outb = 1;
-			state.status.auxb = 1;
-			state.mouse_internal_buffer.head =
-				(
-					state.mouse_internal_buffer.head +
-					1
-					) %
-				BX_MOUSE_BUFF_SIZE;
-			state.mouse_internal_buffer.num_elements--;
-			if (state.allow_irq12)
-				state.irq12_requested = 1;
-		}
-
-#ifdef DEBUG_KBD
-		else
-		{
-			BX_DEBUG(("service_keyboard(): no keys waiting"));
-		}
-#endif
-	}
-
-	retval |= (state.irq1_requested << 0) | (state.irq12_requested << 1);
-	state.irq1_requested = 0;
-	state.irq12_requested = 0;
-
-	return(retval);
+	// Event-driven delivery, same as enQ() — see kbd_service().
+	kbd_service();
 }
 
 void CKeyboard::set_mouse_capture(bool val)
@@ -1857,18 +1754,71 @@ void CKeyboard::create_mouse_packet(bool force_enq)
 }
 
 /**
+ * Drive the 8042's two IRQ lines (keyboard IRQ1, mouse IRQ12) to match the
+ * current output-buffer state.  OBF is a level held until the guest reads
+ * port 0x60; pic_set_line() turns each 0->1 transition into one 8259 edge and
+ * holds the request until it is serviced.
+ **/
+void CKeyboard::kbd_update_irq()
+{
+	theAli->pic_set_line(0, 1,
+		state.status.outb && !state.status.auxb && state.allow_irq1);
+	theAli->pic_set_line(1, 4,
+		state.status.outb &&  state.status.auxb && state.allow_irq12);
+}
+
+/**
+ * Pull the next queued byte into the (single) output buffer if it is free —
+ * keyboard bytes take priority over mouse — and drive the IRQ lines.  
+ *
+ * kbd_update_irq() is called both before and after the refill: the first call
+ * drops the line for the byte just consumed (clearing the 8259 edge latch) so
+ * the refilled byte yields a fresh edge
+ **/
+void CKeyboard::kbd_service()
+{
+	kbd_update_irq();
+
+	if (!state.status.outb)
+	{
+		if (state.kbd_internal_buffer.num_elements
+			&& (state.kbd_clock_enabled || state.bat_in_progress))
+		{
+			state.kbd_output_buffer =
+				state.kbd_internal_buffer.buffer[state.kbd_internal_buffer.head];
+			state.kbd_internal_buffer.head =
+				(state.kbd_internal_buffer.head + 1) % BX_KBD_ELEMENTS;
+			state.kbd_internal_buffer.num_elements--;
+			state.status.outb = 1;
+			state.status.auxb = 0;
+		}
+		else if (state.aux_clock_enabled
+			&& state.mouse_internal_buffer.num_elements)
+		{
+			state.aux_output_buffer =
+				state.mouse_internal_buffer.buffer[state.mouse_internal_buffer.head];
+			state.mouse_internal_buffer.head =
+				(state.mouse_internal_buffer.head + 1) % BX_MOUSE_BUFF_SIZE;
+			state.mouse_internal_buffer.num_elements--;
+			state.status.outb = 1;
+			state.status.auxb = 1;
+		}
+	}
+
+	kbd_update_irq();
+}
+
+/**
  * Keyboard clock. Handle events on a clocked basis.
  *
  * Do the following:
  *  - Let the GUI (if available) handle any pending events.
- *  - Check if interrupts need to be asserted.
- *  - Assert interrupts as needed.
+ *  - Move queued bytes into the output buffer.
+ *  - Drive the IRQ lines from the resulting output-buffer state.
  *  .
  **/
 void CKeyboard::execute()
 {
-	unsigned  retval;
-
 	/* -- moved to VGA card --
 	  if(bx_gui)
 	  {
@@ -1877,12 +1827,8 @@ void CKeyboard::execute()
 		bx_gui->unlock();
 	  }
 	*/
-	retval = periodic();
-
-	if (retval & 0x01)
-		theAli->pic_interrupt(0, 1);
-	if (retval & 0x02)
-		theAli->pic_interrupt(1, 4);
+	create_mouse_packet(0);  // sample any pending mouse movement into a packet
+	kbd_service();           // deliver queued bytes and drive the IRQ lines
 }
 
 /**

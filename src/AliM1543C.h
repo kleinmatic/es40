@@ -170,6 +170,7 @@ public:
   virtual       ~CAliM1543C();
   void          pic_interrupt(int index, int intno);
   void          pic_deassert(int index, int intno);
+  void          pic_set_line(int index, int intno, bool active);
 
   void          set_floppy_presence(bool driveA, bool driveB);
 
@@ -185,6 +186,7 @@ private:
   // Unlocked inner helpers — called only while picLock is held.
   void          pic_interrupt_inner(int index, int intno);
   void          pic_deassert_inner(int index, int intno);
+  void          pic_set_line_inner(int index, int intno, bool active);
 
   // REGISTER 61 (NMI)
   u8        reg_61_read();

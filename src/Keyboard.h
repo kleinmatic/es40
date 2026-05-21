@@ -108,7 +108,8 @@ private:
   void      ctrl_to_mouse(u8 value);
   bool      mouse_enQ_packet(u8 b1, u8 b2, u8 b3, u8 b4);
   void      mouse_enQ(u8 mouse_data);
-  unsigned  periodic();
+  void      kbd_update_irq();
+  void      kbd_service();
 
   //  void kbd_clock();
   void      create_mouse_packet(bool force_enq);
