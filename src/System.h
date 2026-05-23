@@ -278,7 +278,7 @@ public:
   u64           get_c_dim(int ProcNum);
   void          set_c_dim(int ProcNum, u64 value);
 
-  void          cpu_lock(int cpuid, u64 address, int size = 64); // LDx_L: record locked addr + value read there (size in bits)
+  void          cpu_lock(int cpuid, u64 address, u64 value);    // LDx_L: record locked addr + the value loaded (for STx_C compare)
   bool          cpu_take_lock(int cpuid, u64 address, u64* expected); // STx_C: consume lock; true + *expected if still held & matching
   void          cpu_clear_lock(int cpuid);                     // exception/interrupt: drop the lock
   void          RequestSystemReset();

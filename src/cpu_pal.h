@@ -408,8 +408,8 @@
                                                                               \
   case 2:       /* longword physical locked */                                \
     phys_address = state.r[REG_2] + DISP_12;                                  \
-    cSystem->cpu_lock(state.iProcNum, phys_address);                          \
     state.r[REG_1] = READ_PHYS_NT(32);                                        \
+    cSystem->cpu_lock(state.iProcNum, phys_address, state.r[REG_1]);          \
     break;                                                                    \
                                                                               \
   case 4:       /* longword virtual VPTE (HRM 6.4.1 TYPE 0102: LD_VPTE) --    \
@@ -457,8 +457,8 @@
                                                                            \
   case 3:       /* quadword physical locked */                                \
     phys_address = state.r[REG_2] + DISP_12;                                  \
-    cSystem->cpu_lock(state.iProcNum, phys_address);                          \
     state.r[REG_1] = READ_PHYS_NT(64);                                        \
+    cSystem->cpu_lock(state.iProcNum, phys_address, state.r[REG_1]);          \
     break;                                                                    \
                                                                            \
   case 5:       /* quadword virtual VPTE (HRM 6.4.1 TYPE 0102: LD_VPTE) --   \

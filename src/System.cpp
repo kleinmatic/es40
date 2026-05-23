@@ -751,21 +751,10 @@ static inline bool cpu_lock_matches(u64 locked_address, u64 address)
 // cpu_lock_flags is a shared bitmask (one bit per CPU), hence atomic RMW;
 // cpu_lock_address[]/cpu_lock_value[] are touched only by their owning CPU.
 
-void CSystem::cpu_lock(int cpuid, u64 address, int size)
+void CSystem::cpu_lock(int cpuid, u64 address, u64 value)
 {
 	state.cpu_lock_address[cpuid] = address;
-	// Snapshot the value for the matching STx_C's compare-and-swap. A write in
-	// the gap before the actual load just yields a (legal) spurious STx_C fail.
-	u64 dram_sz = (U64(1) << iNumMemoryBits);
-	if (address + 8 <= dram_sz)        // common case: a full quadword is in range
-	{
-		char* p = (char*)memory + address;
-		cpu_lock_value[cpuid] = (size == 32) ? (u64)(*(u32*)p) : *(u64*)p;
-	}
-	else if (address + 4 <= dram_sz)   // in memory but no room for 8 bytes (edge)
-		cpu_lock_value[cpuid] = (u64)(*(u32*)((char*)memory + address));
-	else
-		cpu_lock_value[cpuid] = 0;     // I/O space (or memory edge): value unused, STx_C treated as held
+	cpu_lock_value[cpuid] = value;          // the exact value the matching LDx_L loaded
 	state.cpu_lock_flags |= (1 << cpuid);   // atomic fetch_or
 }
 

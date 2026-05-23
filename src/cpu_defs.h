@@ -640,7 +640,6 @@ inline u64 fsqrt64(u64 asig, s32 exp)
   pbc = false;                                          \
   DATA_PHYS(va, ACCESS_READ, (size/8)-1);               \
   LLR;                         \
-  cSystem->cpu_lock(state.iProcNum, phys_address, size);      \
   if (pbc) {                                            \
     dest = 0;                                           \
     for (int ii=0; ii<(size/8); ii++) {                 \
@@ -649,7 +648,8 @@ inline u64 fsqrt64(u64 asig, s32 exp)
     }                                                   \
   } else {                                              \
     dest = (phys_address < dram_size ? dram_read(dram_ptr, phys_address, size) : cSystem->ReadMem(phys_address, size, this));  \
-  }
+  }                                                     \
+  cSystem->cpu_lock(state.iProcNum, phys_address, dest);
 
 #define READ_VIRT_F(va, size, dest, f)                    \
   pbc = false;                                            \
@@ -670,7 +670,6 @@ inline u64 fsqrt64(u64 asig, s32 exp)
   pbc = false;                                            \
   DATA_PHYS(va, ACCESS_READ, (size/8)-1);                 \
   LLR;                           \
-  cSystem->cpu_lock(state.iProcNum, phys_address, size);        \
   if (pbc) {                                              \
     u64 aa = 0;                                           \
     for (int ii=0; ii<(size/8); ii++) {                   \
@@ -681,6 +680,7 @@ inline u64 fsqrt64(u64 asig, s32 exp)
   } else {                                                \
     dest = f((phys_address < dram_size ? dram_read(dram_ptr, phys_address, size) : cSystem->ReadMem(phys_address, size, this))); \
   }                                                       \
+  cSystem->cpu_lock(state.iProcNum, phys_address, dest);
 
  /**
   * Normal variant of write action
