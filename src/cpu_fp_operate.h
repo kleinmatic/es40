@@ -186,9 +186,10 @@
   { int c = vax_fcmp(state.f[FREG_1], state.f[FREG_2], ins); \
     state.f[FREG_3] = (c < 0) ? U64(0x4000000000000000) : 0; }
 
-/* CMPTEQ/CMPTLT/CMPTLE are signaling: any NaN input raises INV (HRM 4.10.7.5). */
+/* HRM Table A-11: CMPTLT/CMPTLE raise INV on ANY NaN (incl. quiet); CMPTEQ
+   (like CMPTUN) is quiet -- only a signaling NaN raises INV, via ieee_unpack. */
 #define DO_CMPTEQ FPSTART; \
-  { int c = ieee_fcmp(state.f[FREG_1], state.f[FREG_2], ins, 1); \
+  { int c = ieee_fcmp(state.f[FREG_1], state.f[FREG_2], ins, 0); \
     state.f[FREG_3] = (c == 0) ? U64(0x4000000000000000) : 0; }
 
 #define DO_CMPTLE FPSTART; \
