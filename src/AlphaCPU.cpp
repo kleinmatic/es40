@@ -688,6 +688,28 @@ void CAlphaCPU::jit_flush_blocks()
 
 void CAlphaCPU::jit_run(int budget)
 {
+	// Drive the Cchip interval timer once per dispatch batch (CPU0 only), not
+	// once per instruction the way the in-execute() poll did.
+	if (state.iProcNum == 0)
+	{
+		const auto now = std::chrono::steady_clock::now();
+		if (now >= next_timer_fire)
+		{
+			cSystem->interrupt(-1, true);
+			const u64 period_ns = theAli ? theAli->get_interval_period_ns() : 0;
+			if (period_ns)
+			{
+				next_timer_fire += std::chrono::nanoseconds(period_ns);
+				if (now - next_timer_fire > std::chrono::seconds(1))
+					next_timer_fire = now;
+			}
+			else
+			{
+				next_timer_fire = now + std::chrono::seconds(1);
+			}
+		}
+	}
+
 	while (budget > 0)
 	{
 		// Peek the current instruction's physical address for the block lookup.
@@ -882,30 +904,6 @@ void CAlphaCPU::execute()
 		if (state.cc_ena)
 			state.cc += _cc_accum;
 		return;
-	}
-#endif
-
-#ifdef ES40_JIT
-	// The unwound/JIT lane runs one instruction per execute() call and skips the
-	// batch block above, so the Cchip interval-timer poll there never fires.
-	if (state.iProcNum == 0)
-	{
-		const auto now = std::chrono::steady_clock::now();
-		if (now >= next_timer_fire)
-		{
-			cSystem->interrupt(-1, true);
-			const u64 period_ns = theAli ? theAli->get_interval_period_ns() : 0;
-			if (period_ns)
-			{
-				next_timer_fire += std::chrono::nanoseconds(period_ns);
-				if (now - next_timer_fire > std::chrono::seconds(1))
-					next_timer_fire = now;
-			}
-			else
-			{
-				next_timer_fire = now + std::chrono::seconds(1);
-			}
-		}
 	}
 #endif
 
