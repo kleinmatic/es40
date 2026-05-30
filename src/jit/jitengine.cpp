@@ -56,7 +56,7 @@ SafeOp classify(uint32_t ins)
 
 } // namespace
 
-CJitEngine::CJitEngine() : m_recorded(0), m_rt(nullptr)
+CJitEngine::CJitEngine() : m_recorded(0), m_code_bytes(0), m_rt(nullptr)
 {
   flush();                                  // clears valid bits (m_rt still null)
   m_rt = new asmjit::JitRuntime();
@@ -70,15 +70,17 @@ CJitEngine::~CJitEngine()
   delete (asmjit::JitRuntime*) m_rt;
 }
 
-CJitEngine::JitBlock* CJitEngine::record(uint64_t phys_pc, uint64_t virt_pc, uint32_t n_instr)
+CJitEngine::JitBlock* CJitEngine::record(uint64_t virt_pc, uint64_t phys_pc, uint32_t asn, bool asm_global, uint32_t n_instr)
 {
-  JitBlock& b = m_blocks[index_of(phys_pc)];
-  if (b.valid && b.tag == phys_pc) {        // same block re-seen; keep compiled state
+  JitBlock& b = m_blocks[index_of(virt_pc)];
+  if (b.valid && b.tag == virt_pc && (b.asm_global || b.asn == asn)) {  // re-seen; keep compiled state
     b.n_instr = n_instr;
     return &b;
   }
-  b.tag = phys_pc;
-  b.start_virt = virt_pc;
+  b.tag = virt_pc;
+  b.phys = phys_pc;
+  b.asn = asn;
+  b.asm_global = asm_global;
   b.n_instr = n_instr;
   b.valid = true;
   b.code = nullptr;
@@ -93,12 +95,15 @@ void CJitEngine::flush()
 {
   for (int i = 0; i < kCacheEntries; ++i)
     m_blocks[i].valid = false;
-  // Recreate the runtime to reclaim all generated code. reset()-and-reuse was
-  // corrupting the JitAllocator block tree under heavy flush churn.
-  if (m_rt)
+  // flush() runs on every TB invalidation (frequent); tearing down the asmjit
+  // runtime each time was the dominant cost. Code from invalidated blocks is
+  // unreachable, so only reclaim once it has grown past the cap. (delete+new, not
+  // reset()-and-reuse, which corrupted the JitAllocator block tree.)
+  if (m_rt && m_code_bytes >= kReclaimBytes)
   {
     delete (asmjit::JitRuntime*) m_rt;
     m_rt = new asmjit::JitRuntime();
+    m_code_bytes = 0;
   }
 }
 
@@ -109,8 +114,8 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
 
   // Only non-PALmode blocks: there RREG(a)==a, so direct state.r[reg] access is
   // correct. PALmode (PC bit 0) can remap R4-7/R20-23 to the shadow bank.
-  if (b->start_virt & 1) return;
-  uint64_t phys = b->tag;
+  if (b->tag & 1) return;
+  uint64_t phys = b->phys;
   if (b->n_instr == 0 || phys + (uint64_t) b->n_instr * 4 > dram_size) return;
   const uint32_t* words = (const uint32_t*) (dram + phys);   // x86 LE == Alpha LE
 
@@ -196,10 +201,12 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   }
   a.ret();
 
+  const size_t csz = code.code_size();
   JitFn fn = nullptr;
   if (((JitRuntime*) m_rt)->add(&fn, &code) != Error::kOk) return;
   b->code = fn;
   b->prefix_len = plen;
+  m_code_bytes += csz;   // track for the reclaim threshold (see flush())
 }
 
 #ifdef JIT_VERIFY

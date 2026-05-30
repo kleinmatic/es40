@@ -712,19 +712,11 @@ void CAlphaCPU::jit_run(int budget)
 
 	while (budget > 0)
 	{
-		// Peek the current instruction's physical address for the block lookup.
-		// An I-stream fault (ITB miss -> PAL) just moves PC; re-dispatch.
-		u32 _ins;
-		state.current_pc = state.pc;   // get_icache TB-miss handler reads current_pc
-		if (get_icache(state.pc, &_ins))
-		{
-			--budget;
-			continue;
-		}
-		const u64 start_phys = state.pc_phys;
 		const u64 start_virt = state.pc;
+		const u32 start_asn  = (u32) state.asn;
 
-		CJitEngine::JitBlock* b = m_jit->lookup(start_phys);
+		// Hot path: virtual+ASN lookup, no address translation.
+		CJitEngine::JitBlock* b = m_jit->lookup(start_virt, start_asn);
 
 		// Run the compiled safe prefix natively when available.
 		if (b && b->code && (int) b->prefix_len <= budget)
@@ -759,24 +751,32 @@ void CAlphaCPU::jit_run(int budget)
 			continue;
 		}
 
-		// Otherwise interpret the block, record it, and compile its safe prefix.
-		u64  sp = 0;
-		bool hp = false;
-		u32  n = 0;
-		u64  expected = start_virt;
+		// Miss path (cold): peek the I-stream for the physical address, ASM bit, and
+		// fault check, then interpret the block, record it, and compile its prefix.
+		u32 _ins;
+		state.current_pc = state.pc;   // get_icache TB-miss handler reads current_pc
+		if (get_icache(state.pc, &_ins))
+		{
+			--budget;
+			continue;
+		}
+		const u64  start_phys = state.pc_phys;
+		const bool start_asm  = state.icache[state.last_found_icache].asm_bit;
+
+		u32 n = 0;
+		u64 expected = start_virt;
 		while (budget > 0)
 		{
 			execute();
 			--budget;
 			++n;
-			if (!hp) { sp = state.pc_phys; hp = true; }
 			expected += 4;
 			if (state.pc != expected)
 				break;
 		}
-		if (hp && state.pc != expected)
+		if (state.pc != expected)
 		{
-			CJitEngine::JitBlock* nb = m_jit->record(sp, start_virt, n);
+			CJitEngine::JitBlock* nb = m_jit->record(start_virt, start_phys, start_asn, start_asm, n);
 			if (!nb->compiled)
 				m_jit->compile_block(nb, (const uint8_t*) dram_ptr, dram_size);
 		}

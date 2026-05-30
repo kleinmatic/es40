@@ -2,6 +2,10 @@
  *
  * Per-CPU, direct-mapped cache of translation blocks. The dispatcher runs a
  * block's compiled safe-ALU prefix natively, then interprets the remainder.
+ *
+ * Blocks are keyed by VIRTUAL PC + ASN (like the icache), so the dispatch hot
+ * path needs no address translation. A TB invalidation flushes the cache (see
+ * flush()); a global (ASM) block matches any ASN.
  */
 #if !defined(INCLUDED_JITENGINE_H)
 #define INCLUDED_JITENGINE_H
@@ -18,13 +22,19 @@ public:
   static constexpr int      kCacheEntries = 1 << kCacheBits;
   static constexpr uint64_t kIndexMask = (uint64_t) kCacheEntries - 1;
 
+  // Reclaim executable memory once compiled code passes this many bytes, rather
+  // than tearing down the asmjit runtime on every flush (see flush()).
+  static constexpr uint64_t kReclaimBytes = 32 * 1024 * 1024;
+
   // Compiled safe-prefix entry point: applies the prefix's ALU ops to regs[0..31].
   typedef void (*JitFn)(uint64_t* regs);
 
   struct JitBlock
   {
-    uint64_t tag;         // start physical PC (validity tag)
-    uint64_t start_virt;  // start virtual PC
+    uint64_t tag;         // start VIRTUAL PC (validity tag / key)
+    uint64_t phys;        // start physical PC (source bytes for compilation)
+    uint32_t asn;         // address space number (key; ignored when asm_global)
+    bool     asm_global;  // global (ASM) page: matches any ASN, like the icache
     uint32_t n_instr;     // instructions in the straight-line block
     bool     valid;
     JitFn    code;        // compiled safe-prefix, or null
@@ -35,15 +45,17 @@ public:
   CJitEngine();
   ~CJitEngine();
 
-  static inline uint64_t index_of(uint64_t phys_pc) { return (phys_pc >> 2) & kIndexMask; }
+  static inline uint64_t index_of(uint64_t virt_pc) { return (virt_pc >> 2) & kIndexMask; }
 
-  inline JitBlock* lookup(uint64_t phys_pc)
+  // Virtual+ASN keyed: no translation on the dispatch hot path. A global (ASM)
+  // block matches any ASN, mirroring the icache's hit rule.
+  inline JitBlock* lookup(uint64_t virt_pc, uint32_t asn)
   {
-    JitBlock& b = m_blocks[index_of(phys_pc)];
-    return (b.valid && b.tag == phys_pc) ? &b : nullptr;
+    JitBlock& b = m_blocks[index_of(virt_pc)];
+    return (b.valid && b.tag == virt_pc && (b.asm_global || b.asn == asn)) ? &b : nullptr;
   }
 
-  JitBlock* record(uint64_t phys_pc, uint64_t virt_pc, uint32_t n_instr);
+  JitBlock* record(uint64_t virt_pc, uint64_t phys_pc, uint32_t asn, bool asm_global, uint32_t n_instr);
   void compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size);
   void flush();
 
@@ -55,6 +67,7 @@ public:
 private:
   JitBlock m_blocks[kCacheEntries];
   uint64_t m_recorded;
+  uint64_t m_code_bytes;  // compiled bytes since last reclaim (see flush())
   void*    m_rt;          // asmjit::JitRuntime*
 #ifdef JIT_VERIFY
   uint64_t m_v_exec, m_v_fail;
