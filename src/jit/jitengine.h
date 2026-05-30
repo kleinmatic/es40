@@ -45,6 +45,14 @@ public:
     bool     compiled;    // compile has been attempted
   };
 
+  // Byte offsets (from the CAlphaCPU*) of the fields the inline load fast path reads,
+  // so compiled code can touch them via [rsi + offset]. Filled once by set_offsets().
+  struct JitOffsets {
+    uint32_t dpc_valid, dpc_virt_page, dpc_phys_base, dpc_cm, dpc_asn;
+    uint32_t state_cm, state_asn0, dram_ptr, dram_size;
+  };
+  void set_offsets(const JitOffsets& o) { m_off = o; }
+
   CJitEngine();
   ~CJitEngine();
 
@@ -77,6 +85,7 @@ private:
   uint64_t m_recorded;
   uint64_t m_code_bytes;  // compiled bytes since last reclaim (see flush())
   void*    m_rt;          // asmjit::JitRuntime*
+  JitOffsets m_off = {};  // field offsets for the inline load fast path
 #ifdef JIT_VERIFY
   uint64_t m_v_exec, m_v_fail;
 #endif

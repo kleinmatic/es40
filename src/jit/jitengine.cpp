@@ -170,28 +170,66 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       else               a.mov(x86::rcx, reg(rb));
     };
 
-    // Memory-format loads: va = regs[Rb] + disp16; call the read helper; on a
-    // translation fault bail to `done` returning i (instructions 0..i-1 committed).
+    // Memory-format loads: va = regs[Rb] + disp16.
     if (op == OP_LDQ || op == OP_LDL) {
       if (ra == 31) continue;            // LDx R31 is a NOP (interpreter skips the read)
       const int disp = (int) (int16_t) (ins & 0xFFFF);
       const int size_bits = (op == OP_LDQ) ? 64 : 32;
-      if (rb == 31)  a.mov(x86::rdx, imm(disp));
+      const int amask = (size_bits / 8) - 1;
+      if (rb == 31)  a.mov(x86::rdx, imm(disp));         // va -> RDX
       else        {  a.mov(x86::rdx, reg(rb)); if (disp) a.add(x86::rdx, imm(disp)); }
-      a.mov(x86::rcx, x86::rsi);                          // cpu
-      a.mov(x86::r8d, imm(size_bits));                    // size in bits
-      a.lea(x86::r9, x86::qword_ptr(x86::rsp, 32));       // &out slot
-      a.mov(x86::rax, imm((uint64_t) read_helper));
-      a.call(x86::rax);                                   // jit_read(cpu, va, size, &out)
-      Label ok = a.new_label();
-      a.test(x86::eax, x86::eax);
-      a.jz(ok);
-      a.mov(x86::eax, imm(i));                            // fault: bail, i instrs done
-      a.jmp(done);
-      a.bind(ok);
-      if (op == OP_LDQ) a.mov(x86::rax, x86::qword_ptr(x86::rsp, 32));
-      else              a.movsxd(x86::rax, x86::dword_ptr(x86::rsp, 32));  // LDL sign-extends
+
+      // Slow path: jit_read(cpu, va, size, &out); on fault bail to `done` returning i
+      // (0..i-1 committed). In JIT_VERIFY builds this is the ONLY path, so the helper's
+      // replay keeps the differential check race-free.
+      auto emit_helper = [&]() {
+        a.mov(x86::rcx, x86::rsi);                       // cpu
+        a.mov(x86::r8d, imm(size_bits));                 // size in bits
+        a.lea(x86::r9, x86::qword_ptr(x86::rsp, 32));    // &out slot
+        a.mov(x86::rax, imm((uint64_t) read_helper));
+        a.call(x86::rax);
+        Label ok = a.new_label();
+        a.test(x86::eax, x86::eax);
+        a.jz(ok);
+        a.mov(x86::eax, imm(i));                          // fault: bail, i instrs done
+        a.jmp(done);
+        a.bind(ok);
+        if (op == OP_LDQ) a.mov(x86::rax, x86::qword_ptr(x86::rsp, 32));
+        else              a.movsxd(x86::rax, x86::dword_ptr(x86::rsp, 32));
+        a.mov(reg(ra), x86::rax);
+      };
+
+#ifdef JIT_VERIFY
+      emit_helper();
+#else
+      // Inline fast path: aligned + data_page_cache[0] hit + DRAM. Falls to the helper
+      // on misalign / cache miss / MMIO. Mirrors jit_read's data-cache path. RDX = va
+      // (preserved across the checks); RAX/R10 scratch.
+      Label slow  = a.new_label();
+      Label ldone = a.new_label();
+      a.test(x86::dl, imm(amask));                                      a.jnz(slow);
+      a.mov(x86::r10, x86::rdx);
+      a.and_(x86::r10, imm(-0x2000));                                   // r10 = va & ~0x1FFF
+      a.cmp(x86::byte_ptr(x86::rsi, m_off.dpc_valid), imm(0));          a.je(slow);
+      a.cmp(x86::qword_ptr(x86::rsi, m_off.dpc_virt_page), x86::r10);   a.jne(slow);
+      a.mov(x86::eax, x86::dword_ptr(x86::rsi, m_off.state_cm));
+      a.cmp(x86::dword_ptr(x86::rsi, m_off.dpc_cm), x86::eax);          a.jne(slow);
+      a.mov(x86::eax, x86::dword_ptr(x86::rsi, m_off.state_asn0));
+      a.cmp(x86::dword_ptr(x86::rsi, m_off.dpc_asn), x86::eax);         a.jne(slow);
+      a.mov(x86::rax, x86::qword_ptr(x86::rsi, m_off.dpc_phys_base));
+      a.mov(x86::r10, x86::rdx);
+      a.and_(x86::r10, imm(0x1FFF));
+      a.or_(x86::rax, x86::r10);                                        // rax = phys
+      a.cmp(x86::rax, x86::qword_ptr(x86::rsi, m_off.dram_size));       a.jae(slow);
+      a.mov(x86::r10, x86::qword_ptr(x86::rsi, m_off.dram_ptr));
+      if (op == OP_LDQ) a.mov(x86::rax, x86::qword_ptr(x86::r10, x86::rax));
+      else              a.movsxd(x86::rax, x86::dword_ptr(x86::r10, x86::rax));
       a.mov(reg(ra), x86::rax);
+      a.jmp(ldone);
+      a.bind(slow);
+      emit_helper();
+      a.bind(ldone);
+#endif
       continue;
     }
 

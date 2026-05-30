@@ -434,6 +434,21 @@ void CAlphaCPU::init()
 
 #ifdef ES40_JIT
 	if (!m_jit) m_jit = new CJitEngine();
+	{
+		// Tell the JIT the byte offsets (from `this`) of the fields its inline load
+		// fast path reads, so compiled code can address them via [cpu + offset].
+		CJitEngine::JitOffsets o;
+		o.dpc_valid     = (uint32_t) ((char*) &data_page_cache[0].valid     - (char*) this);
+		o.dpc_virt_page = (uint32_t) ((char*) &data_page_cache[0].virt_page - (char*) this);
+		o.dpc_phys_base = (uint32_t) ((char*) &data_page_cache[0].phys_base - (char*) this);
+		o.dpc_cm        = (uint32_t) ((char*) &data_page_cache[0].cm        - (char*) this);
+		o.dpc_asn       = (uint32_t) ((char*) &data_page_cache[0].asn       - (char*) this);
+		o.state_cm      = (uint32_t) ((char*) &state.cm   - (char*) this);
+		o.state_asn0    = (uint32_t) ((char*) &state.asn0 - (char*) this);
+		o.dram_ptr      = (uint32_t) ((char*) &dram_ptr   - (char*) this);
+		o.dram_size     = (uint32_t) ((char*) &dram_size  - (char*) this);
+		m_jit->set_offsets(o);
+	}
 #endif
 
 	state.wait_for_start = (state.iProcNum == 0) ? false : true;
