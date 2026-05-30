@@ -831,63 +831,69 @@ void CAlphaCPU::execute()
 	// for the memory check to run.
 	//--------------------------------------------------------------------------------
 #ifdef SKIP_SRM_MEMTEST
-	if (state.current_pc == U64(0x8bb90))
+	// All five SRM mem-test patch points are in page 0x8b000 and only fire
+	// during early SRM boot. Gate on the page so every other instruction pays
+	// one compare instead of five.
+	if ((state.current_pc & ~U64(0xFFF)) == U64(0x8b000))
 	{
-		if (state.r[5] != U64(0xaaaaaaaaaaaaaaaa))
+		if (state.current_pc == U64(0x8bb90))
 		{
-			printf("wrong memory check skip!\n");
+			if (state.r[5] != U64(0xaaaaaaaaaaaaaaaa))
+			{
+				printf("wrong memory check skip!\n");
+			}
+			else
+			{
+				state.r[0] = state.r[4];
+			}
 		}
-		else
-		{
-			state.r[0] = state.r[4];
-		}
-	}
 
-	if (state.current_pc == U64(0x8bbe0))
-	{
-		if (state.r[5] != U64(0xaaaaaaaaaaaaaaaa))
+		if (state.current_pc == U64(0x8bbe0))
 		{
-			printf("wrong memory check skip!\n");
+			if (state.r[5] != U64(0xaaaaaaaaaaaaaaaa))
+			{
+				printf("wrong memory check skip!\n");
+			}
+			else
+			{
+				state.r[16] = 0;
+			}
 		}
-		else
-		{
-			state.r[16] = 0;
-		}
-	}
 
-	if (state.current_pc == U64(0x8bc28))
-	{
-		if (state.r[5] != U64(0xaaaaaaaaaaaaaaaa))
+		if (state.current_pc == U64(0x8bc28))
 		{
-			printf("wrong memory check skip!\n");
+			if (state.r[5] != U64(0xaaaaaaaaaaaaaaaa))
+			{
+				printf("wrong memory check skip!\n");
+			}
+			else
+			{
+				state.r[8] = state.r[4];
+			}
 		}
-		else
-		{
-			state.r[8] = state.r[4];
-		}
-	}
 
-	if (state.current_pc == U64(0x8bc70))
-	{
-		if (state.r[7] != U64(0x5555555555555555))
+		if (state.current_pc == U64(0x8bc70))
 		{
-			printf("wrong memory check skip1!\n");
+			if (state.r[7] != U64(0x5555555555555555))
+			{
+				printf("wrong memory check skip1!\n");
+			}
+			else
+			{
+				state.r[0] = 0;
+			}
 		}
-		else
-		{
-			state.r[0] = 0;
-		}
-	}
 
-	if (state.current_pc == U64(0x8bcb0))
-	{
-		if (state.r[7] != U64(0x5555555555555555))
+		if (state.current_pc == U64(0x8bcb0))
 		{
-			printf("wrong memory check skip2!\n");
-		}
-		else
-		{
-			state.r[3] = state.r[4];
+			if (state.r[7] != U64(0x5555555555555555))
+			{
+				printf("wrong memory check skip2!\n");
+			}
+			else
+			{
+				state.r[3] = state.r[4];
+			}
 		}
 	}
 #endif
