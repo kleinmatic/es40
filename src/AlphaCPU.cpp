@@ -797,6 +797,14 @@ void CAlphaCPU::jit_run(int budget)
 					sva  = (srb == 31 ? (u64) 0 : state.r[srb]) + (u64) sdisp;
 					sval = (lra == 31 ? (u64) 0 : state.r[lra]);
 				}
+				// Computed jump (JMP/JSR/RET): target = Rb & ~3, taken before execute() (the
+				// jump's target uses the old Rb, even if Ra==Rb gets the return address after).
+				u64 jtgt = 0;
+				if (opc == 0x1a)
+				{
+					const int jrb = (ins >> 16) & 0x1F;
+					jtgt = (jrb == 31 ? (u64) 0 : state.r[jrb]) & ~U64(3);
+				}
 				execute();
 				--budget;
 				vpc += 4;
@@ -816,6 +824,10 @@ void CAlphaCPU::jit_run(int budget)
 						const int64_t bdisp = (int64_t) ((uint64_t) (ins & 0x1FFFFF) << 43) >> 43;
 						const u64 tgt = vpc + (u64) (bdisp * 4);   // vpc == branch_pc + 4 (fall-through)
 						ok_branch = (state.pc == tgt);
+					}
+					else if (k == b->prefix_len - 1 && opc == 0x1a)
+					{
+						ok_branch = (state.pc == jtgt);   // computed jump reached its register target
 					}
 					if (!ok_branch)
 						clean = false;

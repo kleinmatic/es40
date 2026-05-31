@@ -19,12 +19,15 @@ enum SafeOp {
   OP_LDQ, OP_LDL,                // memory-format loads: Ra = MEM[Rb + disp16]
   OP_STQ, OP_STL,                // memory-format stores: MEM[Rb + disp16] = Ra
   OP_LDA, OP_LDAH,               // load-address: Ra = Rb + disp16 (<<16 for LDAH); pure ALU
+  OP_JMP,                        // JMP/JSR/RET (0x1a): Ra = PC+4; PC = Rb & ~3 (computed target)
   // Branch-format terminators (contiguous; see is_branch). Conditional on Ra, plus BR/BSR.
   OP_BEQ, OP_BNE, OP_BLT, OP_BLE, OP_BGT, OP_BGE, OP_BLBC, OP_BLBS, OP_BR, OP_BSR
 };
 
 static inline bool is_branch(SafeOp op) { return op >= OP_BEQ && op <= OP_BSR; }
 static inline bool is_store(SafeOp op)  { return op == OP_STQ || op == OP_STL; }
+// A terminator ends the block and writes its own next PC (branches + the computed jump).
+static inline bool is_terminator(SafeOp op) { return op == OP_JMP || is_branch(op); }
 
 // Safe = goto-free, register-only operate-format ops (no trap, memory, or branch).
 SafeOp classify(uint32_t ins)
@@ -60,6 +63,7 @@ SafeOp classify(uint32_t ins)
       break;
     case 0x08: return OP_LDA;   // load address (Ra = Rb + disp16) -- pure ALU, no memory
     case 0x09: return OP_LDAH;  // load address high (Ra = Rb + (disp16 << 16))
+    case 0x1a: return OP_JMP;   // JMP/JSR/RET/JSR_CO: Ra = PC+4; PC = Rb & ~3 (hint ignored)
     case 0x28: return OP_LDL;   // memory-format loads (Ra = MEM[Rb+disp16])
     case 0x29: return OP_LDQ;
     case 0x2c: return OP_STL;   // memory-format stores (MEM[Rb+disp16] = Ra)
@@ -168,7 +172,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       break;
     }
     plen++;
-    if (is_branch(sop)) { terminator_branch = true; break; }   // a branch terminates the block
+    if (is_terminator(sop)) { terminator_branch = true; break; }   // branch or computed jump ends it
   }
   if (plen == 0) return;
 
@@ -319,6 +323,19 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       if (rb == 31)  a.mov(x86::rax, imm(d));
       else        {  a.mov(x86::rax, reg(rb)); if (d) a.add(x86::rax, imm(d)); }
       a.mov(reg(ra), x86::rax);
+      continue;
+    }
+
+    // Computed jump JMP/JSR/RET (0x1a): Ra = PC+4 (return address); PC = Rb & ~3. A
+    // terminator like a branch, but the target is a register -- left in R10 so the epilogue's
+    // cached link validates it (succ->tag == target), chaining calls/returns/dispatch.
+    if (op == OP_JMP) {
+      const uint64_t ret = b->tag + 4 * (uint64_t) (i + 1);
+      if (rb == 31) a.xor_(x86::r10d, x86::r10d);
+      else          a.mov(x86::r10, reg(rb));
+      a.and_(x86::r10, imm(~(uint64_t) 3));                       // target = Rb & ~3 (clear low 2)
+      if (ra != 31) { a.mov(x86::rax, imm(ret)); a.mov(reg(ra), x86::rax); }  // return addr (after reading Rb)
+      a.mov(x86::qword_ptr(x86::rsi, m_off.state_pc), x86::r10);  // state.pc = target
       continue;
     }
 
