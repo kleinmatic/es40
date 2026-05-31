@@ -94,6 +94,7 @@ CJitEngine::CJitEngine() : m_recorded(0), m_code_bytes(0), m_rt(nullptr)
   m_stat_native = m_stat_interp = m_stat_hot = m_stat_miss = 0;
   m_stat_compiled = m_stat_plen_sum = 0;
   memset(m_term_op, 0, sizeof(m_term_op));
+  memset(m_pal_func, 0, sizeof(m_pal_func));
 #endif
 }
 
@@ -172,6 +173,8 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     if (sop == OP_NONE) {               // uncompilable op ends the straight-line prefix
 #ifdef JIT_STATS
       m_term_op[words[plen] >> 26]++;   // tally what cut this block (the coverage gap to chase)
+      if ((words[plen] >> 26) == 0x00)  // CALL_PAL: also tally the function code (low 8 bits)
+        m_pal_func[words[plen] & 0xFF]++;
 #endif
       break;
     }
@@ -573,6 +576,19 @@ void CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr)
     hist[best] = 0;
   }
   printf("\n");
+  if (m_term_op[0]) {   // CALL_PAL cut blocks -- show which function codes dominate (chain targets)
+    printf("[JIT][STATS]   CALL_PAL by func:");
+    uint64_t ph[256];
+    memcpy(ph, m_pal_func, sizeof(ph));
+    for (int rank = 0; rank < 8; ++rank) {
+      int best = -1; uint64_t bestv = 0;
+      for (int f = 0; f < 256; ++f) if (ph[f] > bestv) { bestv = ph[f]; best = f; }
+      if (best < 0) break;
+      printf(" 0x%02x=%llu", best, (unsigned long long) bestv);
+      ph[best] = 0;
+    }
+    printf("\n");
+  }
   m_stat_native = m_stat_interp = m_stat_hot = m_stat_miss = 0;   // reset the window
 }
 #endif

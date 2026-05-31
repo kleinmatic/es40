@@ -428,7 +428,13 @@ void CAlphaCPU::init()
 	last_dtb_virt[0] = last_dtb_virt[1] = 0;
 
 	cpu_hz = myCfg->get_num_value("speed", true, 500000000);
+#ifdef ES40_JIT
+	// With the JIT, PALcode runs natively (compiled like any other guest code) rather than being
+	// shortcut by the high-level vmspal routines, so the replacement is force-disabled
+	vmspal_lle_enabled = true;
+#else
 	vmspal_lle_enabled = myCfg->get_bool_value("palcode.vms.nohle", false);
+#endif
 
 	state.iProcNum = cSystem->RegisterCPU(this);
 

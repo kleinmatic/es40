@@ -99,6 +99,7 @@ private:
   uint64_t m_stat_hot, m_stat_miss;             // windowed: compiled-chain dispatches, interp blocks
   uint64_t m_stat_compiled, m_stat_plen_sum;    // cumulative: compiled blocks, sum of their lengths
   uint64_t m_term_op[64];                       // cumulative: opcode that ended a block's compiled prefix
+  uint64_t m_pal_func[256];                     // cumulative: CALL_PAL function code that ended a block
 #endif
 };
 
