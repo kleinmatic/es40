@@ -241,9 +241,13 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     auto reg = [&](int r) {
       // PALshadow (RREG, AlphaCPU.h): in a PALmode block with SDE set, R4-7 and R20-23 map to
       // the shadow bank r[r+32]. 
-      int idx = r;
-      if (pal_block && ((r & 0xc) == 0x4)) idx = r + 32;
+      int idx = (pal_block && ((r & 0xc) == 0x4)) ? r + 32 : r;
       return x86::qword_ptr(x86::rbx, idx * 8);
+    };
+    // 32-bit (low-dword) view with the SAME shadow remap, for the 32-bit ALU ops (ADDL/SUBL).
+    auto reg32 = [&](int r) {
+      int idx = (pal_block && ((r & 0xc) == 0x4)) ? r + 32 : r;
+      return x86::dword_ptr(x86::rbx, idx * 8);
     };
     auto op1_rax = [&]() {
       if (ra == 31) a.xor_(x86::eax, x86::eax);
@@ -432,10 +436,10 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       case OP_ADDL: case OP_SUBL:  // 32-bit, result sign-extended to 64
       {
         if (ra == 31) a.xor_(x86::eax, x86::eax);
-        else          a.mov(x86::eax, x86::dword_ptr(x86::rbx, ra * 8));
+        else          a.mov(x86::eax, reg32(ra));   // shadow-remapped (was a raw rbx read)
         if (islit)         a.mov(x86::ecx, imm(lit));
         else if (rb == 31) a.xor_(x86::ecx, x86::ecx);
-        else               a.mov(x86::ecx, x86::dword_ptr(x86::rbx, rb * 8));
+        else               a.mov(x86::ecx, reg32(rb));
         if (op == OP_ADDL) a.add(x86::eax, x86::ecx);
         else               a.sub(x86::eax, x86::ecx);
         a.movsxd(x86::rax, x86::eax);
@@ -533,7 +537,8 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
 }
 
 #ifdef JIT_VERIFY
-void CJitEngine::verify_compare(uint64_t blk_virt, const uint64_t* interp, const uint64_t* jit)
+void CJitEngine::verify_compare(uint64_t blk_virt, const uint64_t* interp, const uint64_t* jit,
+                                const uint32_t* words, uint32_t nwords)
 {
   m_v_exec++;
   for (int r = 0; r < 63; ++r) {   // r0..r30 main bank + r32..r62 PALshadow bank
@@ -543,6 +548,9 @@ void CJitEngine::verify_compare(uint64_t blk_virt, const uint64_t* interp, const
       printf("[JIT][VERIFY] MISMATCH at block pc=%016llx: r%d interp=%016llx jit=%016llx\n",
              (unsigned long long) blk_virt, r,
              (unsigned long long) interp[r], (unsigned long long) jit[r]);
+      printf("   words:");   // the compiled prefix, to decode which instruction diverged
+      for (uint32_t w = 0; w < nwords && w < 16; ++w) printf(" %08x", words[w]);
+      printf("\n");
       break;
     }
   }

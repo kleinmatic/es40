@@ -77,7 +77,8 @@ public:
 
 #ifdef JIT_VERIFY
   // Differential check: compiled result (jit) vs interpreter result (interp), r[0..30].
-  void verify_compare(uint64_t blk_virt, const uint64_t* interp, const uint64_t* jit);
+  void verify_compare(uint64_t blk_virt, const uint64_t* interp, const uint64_t* jit,
+                      const uint32_t* words, uint32_t nwords);
 #endif
 
 #ifdef JIT_STATS

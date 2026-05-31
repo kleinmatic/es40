@@ -791,7 +791,7 @@ void CAlphaCPU::jit_run(int budget)
 				{
 					const int lrb = (ins >> 16) & 0x1F;
 					const int ldisp = (int) (int16_t) (ins & 0xFFFF);
-					eva = (lrb == 31 ? (u64) 0 : state.r[lrb]) + (u64) ldisp;
+					eva = (lrb == 31 ? (u64) 0 : state.r[RREG(lrb)]) + (u64) ldisp;
 				}
 				// Stores touch memory, not GPRs, so record (addr,value) for the compiled-pass
 				// compare. Ra (lra) is the value source; Rb is the base.
@@ -801,8 +801,8 @@ void CAlphaCPU::jit_run(int budget)
 				{
 					const int srb = (ins >> 16) & 0x1F;
 					const int sdisp = (int) (int16_t) (ins & 0xFFFF);
-					sva  = (srb == 31 ? (u64) 0 : state.r[srb]) + (u64) sdisp;
-					sval = (lra == 31 ? (u64) 0 : state.r[lra]);
+					sva  = (srb == 31 ? (u64) 0 : state.r[RREG(srb)]) + (u64) sdisp;
+					sval = (lra == 31 ? (u64) 0 : state.r[RREG(lra)]);
 				}
 				// Computed jump (JMP/JSR/RET): target = Rb & ~3, taken before execute() (the
 				// jump's target uses the old Rb, even if Ra==Rb gets the return address after).
@@ -810,7 +810,7 @@ void CAlphaCPU::jit_run(int budget)
 				if (opc == 0x1a)
 				{
 					const int jrb = (ins >> 16) & 0x1F;
-					jtgt = (jrb == 31 ? (u64) 0 : state.r[jrb]) & ~U64(3);
+					jtgt = (jrb == 31 ? (u64) 0 : state.r[RREG(jrb)]) & ~U64(3);
 				}
 				execute();
 				--budget;
@@ -843,7 +843,7 @@ void CAlphaCPU::jit_run(int budget)
 				if (isld && vn < 64)
 				{
 					m_jit_vaddr[vn] = eva;
-					m_jit_vlog[vn] = state.r[lra];
+					m_jit_vlog[vn] = state.r[RREG(lra)];   // shadow-aware: PALmode dest may be a shadow reg
 					vn++;
 				}
 				if (isst && sn < 64)
@@ -884,7 +884,7 @@ void CAlphaCPU::jit_run(int budget)
 						       (unsigned long long) state.r[2], (unsigned long long) jr[2],
 						       (unsigned long long) snap[5]);
 					}
-					m_jit->verify_compare(start_virt, state.r, jr);
+					m_jit->verify_compare(start_virt, state.r, jr, vw, b->prefix_len);
 				}
 				state.pc = interp_pc;   // restore; the block's PC write was only for the check
 			}
