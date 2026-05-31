@@ -366,7 +366,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       if (rb == 31) a.xor_(x86::r10d, x86::r10d);
       else          a.mov(x86::r10, reg(rb));
       a.and_(x86::r10, imm(~(uint64_t) 3));                       // target = Rb & ~3 (clear low 2)
-      if (ra != 31) { a.mov(x86::rax, imm(ret)); a.mov(reg(ra), x86::rax); }  // return addr (after reading Rb)
+      if (ra != 31) { a.mov(x86::rax, imm(ret & ~(uint64_t) 3)); a.mov(reg(ra), x86::rax); }  // return addr = PC & ~3 (DO_JMP)
       a.mov(x86::qword_ptr(x86::rsi, m_off.state_pc), x86::r10);  // state.pc = target
       continue;
     }
