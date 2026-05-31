@@ -162,10 +162,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
 
   // PALmode blocks (PC bit 0) can remap R4-7/R20-23 to the shadow bank (see RREG), so direct
   // state.r[reg] access isn't valid there. 
-  const bool pal_block = (b->tag & 1) != 0;
-#ifndef JIT_STATS
-  if (pal_block) return;
-#endif
+  const bool pal_block = (b->tag & 1) != 0;   // PALmode (PC bit 0); reg() applies the shadow remap
 
   // Stop at the 8 KB page boundary: past it the next instruction's physical
   // address need not be phys+4 (the next virtual page maps elsewhere), so words[]
@@ -203,8 +200,6 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     }
   }
 
-  // PALmode blocks were scanned above - Interpret them
-  if (pal_block) return;
   if (plen == 0) return;
 
   // Emit  uint32_t fn(CAlphaCPU* cpu, uint64_t* regs)  (Win64: cpu=RCX, regs=RDX).
@@ -383,7 +378,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       const uint64_t fall  = b->tag + 4 * (uint64_t) (i + 1);
       const uint64_t tgt   = fall + (uint64_t) (bdisp * 4);
       if (op == OP_BR || op == OP_BSR) {                 // Ra = return address; PC = target
-        if (ra != 31) { a.mov(x86::r10, imm(fall)); a.mov(reg(ra), x86::r10); }
+        if (ra != 31) { a.mov(x86::r10, imm(fall & ~(uint64_t) 3)); a.mov(reg(ra), x86::r10); }  // link = PC & ~3 (DO_BR)
         a.mov(x86::r10, imm(tgt));
       } else {                                           // conditional: PC = cond ? target : fall
         if (ra == 31) a.xor_(x86::eax, x86::eax);
@@ -541,7 +536,8 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
 void CJitEngine::verify_compare(uint64_t blk_virt, const uint64_t* interp, const uint64_t* jit)
 {
   m_v_exec++;
-  for (int r = 0; r < 31; ++r) {
+  for (int r = 0; r < 63; ++r) {   // r0..r30 main bank + r32..r62 PALshadow bank
+    if (r == 31) continue;         // zero register
     if (interp[r] != jit[r]) {
       m_v_fail++;
       printf("[JIT][VERIFY] MISMATCH at block pc=%016llx: r%d interp=%016llx jit=%016llx\n",

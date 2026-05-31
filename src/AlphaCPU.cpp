@@ -764,13 +764,14 @@ void CAlphaCPU::jit_run(int budget)
 		// interrupt or delayed timer is pending. Compiled blocks don't run the
 		// per-instruction polls, so run the interpreter.
 		if (b && b->code && b->phys == start_phys && (int) b->prefix_len <= budget
-			&& !state.check_int && !state.check_timers)
+			&& !state.check_int && !state.check_timers
+			&& (!(b->tag & 1) || state.sde))   // PALmode block: its shadow-register remap assumes SDE
 		{
 #ifdef JIT_VERIFY
 			// Interpret the prefix (authoritative), recording each loaded value so the
 			// compiled pass can replay it instead of re-reading memory. Skip the compare
 			// if an interrupt/trap diverts us mid-prefix.
-			u64 snap[32];
+			u64 snap[64];   // 64: capture the PALshadow bank (r32..r63) for PALmode blocks
 			memcpy(snap, state.r, sizeof(snap));
 			const u32* vw = (const u32*) ((const u8*) dram_ptr + b->phys);
 			u32 vn = 0;   // loads recorded for replay
@@ -854,7 +855,7 @@ void CAlphaCPU::jit_run(int budget)
 			}
 			if (clean)
 			{
-				u64 jr[32];
+				u64 jr[64];   // 64: a compiled PALmode block may touch the shadow bank
 				memcpy(jr, snap, sizeof(jr));
 				const u64 interp_pc = state.pc;   // interpreter is authoritative for the PC
 				m_jit_vreplay = true;
