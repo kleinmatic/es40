@@ -103,6 +103,8 @@ CJitEngine::JitBlock* CJitEngine::record(uint64_t virt_pc, uint64_t phys_pc, uin
   b.n_instr = n_instr;
   b.valid = true;
   b.code = nullptr;
+  b.jit_body = nullptr;   // not compiled yet -> cached links to us must miss until compile
+  b.link = nullptr;       // no cached successor yet
   b.prefix_len = 0;
   b.compiled = false;
   if (++m_recorded == 50000)
@@ -112,8 +114,10 @@ CJitEngine::JitBlock* CJitEngine::record(uint64_t virt_pc, uint64_t phys_pc, uin
 
 void CJitEngine::flush()
 {
-  for (int i = 0; i < kCacheEntries; ++i)
+  for (int i = 0; i < kCacheEntries; ++i) {
     m_blocks[i].valid = false;
+    m_blocks[i].jit_body = nullptr;   // break stale cached links: the epilogue gates jumps on jit_body
+  }
   // flush() runs on every TB invalidation (frequent); tearing down the asmjit
   // runtime each time was the dominant cost. Code from invalidated blocks is
   // unreachable, so only reclaim once it has grown past the cap. (delete+new, not
@@ -170,8 +174,9 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   a.xor_(x86::r14d, x86::r14d);   // instruction count := 0
 
   Label done = a.new_label();  // shared exit: restore frame + ret (EAX preset by caller)
-  Label body = a.new_label();  // self-loop re-entry (after the prologue; preserves R14)
+  Label body = a.new_label();  // chained re-entry (after the prologue; preserves R14)
   a.bind(body);
+  const size_t body_off = code.code_size();   // byte offset of the chained entry from fn
 
   // The compiled block computes its own next PC into state.pc at every exit (the
   // foundation for branch compilation and block linking). R10 is scratch here.
@@ -340,27 +345,64 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
 
     if (rc != 31) a.mov(reg(rc), x86::rax);
   }
-  // Epilogue. Count this block's instructions, then either loop back into our own body
-  // (self-loop: the terminator branch targets our own start) or return to the dispatcher.
-  if (terminator_branch) {
-    // R10 still holds the next PC (the branch codegen left it there and wrote state.pc).
-    a.add(x86::r14d, imm(plen));
+  // Epilogue. Count this block's instructions, then chain into the next block (staying
+  // in native code) or return to the dispatcher.
 #ifndef JIT_VERIFY
-    // Self-loop: when the taken branch returns to our own start (r10 == b->tag) and we
-    // still have budget and no pending interrupt/timer, jump straight back into the body
-    // rather than round-tripping through the C dispatcher.
+  // Gate the chain: stop if we've hit the budget ceiling or an interrupt/timer is pending
+  auto emit_gate = [&](Label& lbl) {
+    a.cmp(x86::r14, x86::qword_ptr(x86::rsi, m_off.jit_budget)); a.jge(lbl);
+    a.cmp(x86::byte_ptr(x86::rsi, m_off.check_int), imm(0));     a.jne(lbl);
+    a.cmp(x86::byte_ptr(x86::rsi, m_off.check_timers), imm(0));  a.jne(lbl);
+  };
+  // Field offsets within a JitBlock, so the epilogue can validate a cached successor via
+  // [succ + off]. 
+  const uint32_t off_body = (uint32_t) ((char*) &b->jit_body - (char*) b);
+  const uint32_t off_tag  = (uint32_t) ((char*) &b->tag      - (char*) b);
+  // Cached direct link: tail straight into our cached successor's body if it's still live
+  // -- compiled (jit_body != 0, cleared on flush/recompile) AND still maps this exit's PC
+  // (tag == R10). Otherwise record a patch request (m_link_from = this block) so the
+  // dispatcher fills b->link the next time it runs the successor, and fall back to it.
+  // R10 = next PC; clobbers RAX/RCX/RDX.
+  auto emit_chain = [&](Label& lbl) {
+    Label miss = a.new_label();
+    a.mov(x86::rax, imm((uint64_t) &b->link));
+    a.mov(x86::rax, x86::qword_ptr(x86::rax));                 // succ = b->link
+    a.test(x86::rax, x86::rax);                            a.jz(miss);
+    a.mov(x86::rcx, x86::qword_ptr(x86::rax, off_body));       // succ->jit_body
+    a.test(x86::rcx, x86::rcx);                            a.jz(miss);
+    a.mov(x86::rdx, x86::qword_ptr(x86::rax, off_tag));        // succ->tag
+    a.cmp(x86::rdx, x86::r10);                             a.jne(miss);   // not this exit's target
+    a.jmp(x86::rcx);                                           // HIT: tail in (shared frame)
+    a.bind(miss);
+    a.mov(x86::rax, imm((uint64_t) b));
+    a.mov(x86::qword_ptr(x86::rsi, m_off.link_from), x86::rax);   // request b->link patch
+    // fall through to lbl (return to dispatcher)
+  };
+#endif
+  if (terminator_branch) {
+    a.add(x86::r14d, imm(plen));   // R10 still holds the next PC (branch wrote state.pc + R10)
+#ifndef JIT_VERIFY
     Label exit_chain = a.new_label();
-    a.mov(x86::rax, imm(b->tag));                                // tag may exceed imm32
-    a.cmp(x86::r10, x86::rax);                                   a.jne(exit_chain);
-    a.cmp(x86::r14, x86::qword_ptr(x86::rsi, m_off.jit_budget)); a.jge(exit_chain);
-    a.cmp(x86::byte_ptr(x86::rsi, m_off.check_int), imm(0));     a.jne(exit_chain);
-    a.cmp(x86::byte_ptr(x86::rsi, m_off.check_timers), imm(0));  a.jne(exit_chain);
+    Label not_self   = a.new_label();
+    emit_gate(exit_chain);
+    // Self-loop fast path: a taken branch back to our own start (r10 == b->tag) jumps
+    // straight into the body, skipping the resolver call entirely.
+    a.mov(x86::rax, imm(b->tag));                               // tag may exceed imm32
+    a.cmp(x86::r10, x86::rax);                                  a.jne(not_self);
     a.jmp(body);
+    a.bind(not_self);
+    emit_chain(exit_chain);
     a.bind(exit_chain);
 #endif
   } else {
     set_pc(b->tag + 4 * (uint64_t) plen);   // straight-line fall-through to the next block
     a.add(x86::r14d, imm(plen));
+#ifndef JIT_VERIFY
+    Label exit_chain = a.new_label();
+    emit_gate(exit_chain);
+    emit_chain(exit_chain);
+    a.bind(exit_chain);
+#endif
   }
   a.mov(x86::eax, x86::r14d);   // total instructions completed across the chain
   a.bind(done);                 // bail jumps here with EAX already set
@@ -374,6 +416,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   JitFn fn = nullptr;
   if (((JitRuntime*) m_rt)->add(&fn, &code) != Error::kOk) return;
   b->code = fn;
+  b->jit_body = (void*) ((uint8_t*) (void*) fn + body_off);   // chained re-entry (past prologue)
   b->prefix_len = plen;
   m_code_bytes += csz;   // track for the reclaim threshold (see flush())
 }

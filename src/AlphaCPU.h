@@ -480,7 +480,8 @@ private:
 #ifdef ES40_JIT
   // JIT block-discovery engine (per-CPU), allocated in init().
   CJitEngine* m_jit = nullptr;
-  s64  m_jit_budget = 0;       // instruction ceiling for a compiled self-looping chain
+  s64  m_jit_budget = 0;       // instruction ceiling for a compiled chain
+  void* m_link_from = nullptr; // JitBlock* whose successor link the dispatcher should patch
   void jit_run(int budget);    // drives the ES40_JIT lane via the interpreter
   void jit_flush_blocks();     // invalidate all discovered JIT blocks
   // Compiled-block memory helper: read size_bits from va into *out; returns 0 on

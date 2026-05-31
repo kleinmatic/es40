@@ -451,6 +451,7 @@ void CAlphaCPU::init()
 		o.jit_budget    = (uint32_t) ((char*) &m_jit_budget      - (char*) this);
 		o.check_int     = (uint32_t) ((char*) &state.check_int    - (char*) this);
 		o.check_timers  = (uint32_t) ((char*) &state.check_timers - (char*) this);
+		o.link_from     = (uint32_t) ((char*) &m_link_from        - (char*) this);
 		m_jit->set_offsets(o);
 	}
 #endif
@@ -851,7 +852,11 @@ void CAlphaCPU::jit_run(int budget)
 			}
 			continue;
 #else
-			m_jit_budget = budget;   // ceiling for self-looping chains (epilogue stops at it)
+			// A predecessor block's epilogue cache-missed and asked to be linked here. Now
+			// that we know this block is live and compiled, patch its successor pointer so it
+			// jumps straight in instead of returning
+			if (m_link_from) { ((CJitEngine::JitBlock*) m_link_from)->link = b; m_link_from = nullptr; }
+			m_jit_budget = budget;   // ceiling for compiled chains (epilogue stops at it)
 			const u32 done = b->code(this, &state.r[0]);
 			state.r[31] = 0;
 			// state.pc is written by the compiled block itself (next PC, or the bail PC).
@@ -871,7 +876,9 @@ void CAlphaCPU::jit_run(int budget)
 		}
 
 		// Miss path (cold): the up-front I-stream peek already gave start_phys/start_asm.
-		// Interpret the block, record it, and compile its prefix.
+		// We're not running a compiled block here, so drop any pending link request, interpret
+		// the block, record it, and compile its prefix.
+		m_link_from = nullptr;
 		u32 n = 0;
 		u64 expected = start_virt;
 		while (budget > 0)

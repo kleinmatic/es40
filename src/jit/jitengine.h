@@ -40,7 +40,9 @@ public:
     bool     asm_global;  // global (ASM) page: matches any ASN, like the icache
     uint32_t n_instr;     // instructions in the straight-line block
     bool     valid;
-    JitFn    code;        // compiled safe-prefix, or null
+    JitFn    code;        // compiled safe-prefix, or null (prologue entry, for C calls)
+    void*    jit_body;    // chained re-entry point (after the prologue); null when not compiled
+    JitBlock* link;       // cached successor block (back-patched by the dispatcher); null = none
     uint32_t prefix_len;  // # safe ALU ops in code
     bool     compiled;    // compile has been attempted
   };
@@ -50,9 +52,9 @@ public:
   struct JitOffsets {
     uint32_t dpc_valid, dpc_virt_page, dpc_phys_base, dpc_cm, dpc_asn;
     uint32_t state_cm, state_asn0, dram_ptr, dram_size, state_pc;
-    // For self-loop chaining: the budget ceiling and the interrupt-poll flags the
-    // compiled epilogue checks before looping back to its own body entry.
-    uint32_t jit_budget, check_int, check_timers;
+    // For chaining: the budget ceiling and the interrupt-poll flags the compiled epilogue
+    // checks before jumping on; link_from is where the epilogue records a link-patch request.
+    uint32_t jit_budget, check_int, check_timers, link_from;
   };
   void set_offsets(const JitOffsets& o) { m_off = o; }
 
