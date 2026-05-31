@@ -458,6 +458,9 @@ void CAlphaCPU::init()
 		o.check_int     = (uint32_t) ((char*) &state.check_int    - (char*) this);
 		o.check_timers  = (uint32_t) ((char*) &state.check_timers - (char*) this);
 		o.link_from     = (uint32_t) ((char*) &m_link_from        - (char*) this);
+		o.exc_addr      = (uint32_t) ((char*) &state.exc_addr - (char*) this);
+		o.pal_base      = (uint32_t) ((char*) &state.pal_base - (char*) this);
+		o.sde           = (uint32_t) ((char*) &state.sde      - (char*) this);
 		m_jit->set_offsets(o);
 	}
 #endif
@@ -836,6 +839,14 @@ void CAlphaCPU::jit_run(int budget)
 					{
 						ok_branch = (state.pc == jtgt);   // computed jump reached its register target
 					}
+					else if (k == b->prefix_len - 1 && opc == 0x00)
+					{
+						// CALL_PAL vectored to its PALcode entry (pal_base | offset); the kernel-mode
+						// path never traps, but accept the OPCDEC vector too.
+						const u32 func = ins & 0x1FFFFFFF;
+						const u64 voff = (u64) 0x2000 | ((u64) (func & 0x80) << 5) | ((u64) (func & 0x3f) << 6) | U64(1);
+						ok_branch = (state.pc == (state.pal_base | voff)) || (state.pc == (state.pal_base | OPCDEC | U64(1)));
+					}
 					if (!ok_branch)
 						clean = false;
 					break;
@@ -936,7 +947,8 @@ void CAlphaCPU::jit_run(int budget)
 			CJitEngine::JitBlock* nb = m_jit->record(start_virt, start_phys, start_asn, start_asm, n);
 			if (!nb->compiled)
 				m_jit->compile_block(nb, (const uint8_t*) dram_ptr, dram_size,
-				                     (void*) &CAlphaCPU::jit_read, (void*) &CAlphaCPU::jit_write);
+				                     (void*) &CAlphaCPU::jit_read, (void*) &CAlphaCPU::jit_write,
+				                     (void*) &CAlphaCPU::jit_opcdec);
 		}
 	}
 }
@@ -1056,6 +1068,16 @@ int CAlphaCPU::jit_write(CAlphaCPU* cpu, u64 va, int size_bits, u64 value)
 	else
 		cpu->cSystem->WriteMem(phys, size_bits, value, cpu);
 	return 0;
+}
+
+/* CALL_PAL OPCDEC trap: a privileged function (< 0x40) attempted in user mode. Mirrors
+   GO_PAL(OPCDEC) -- save the faulting PC in EXC_ADDR, vector to the PALcode OPCDEC entry,
+   and clear the load-lock flag */
+void CAlphaCPU::jit_opcdec(CAlphaCPU* cpu, u64 cpc)
+{
+	cpu->state.exc_addr = cpc;
+	cpu->set_pc(cpu->state.pal_base | OPCDEC | U64(1));
+	cpu->cSystem->cpu_clear_lock(cpu->state.iProcNum);
 }
 #endif
 

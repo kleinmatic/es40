@@ -488,6 +488,8 @@ private:
   // Return 0 on success, 1 on fault/unaligned (caller bails to the interpreter).
   static int jit_read(CAlphaCPU* cpu, u64 va, int size_bits, u64* out);
   static int jit_write(CAlphaCPU* cpu, u64 va, int size_bits, u64 value);
+  // CALL_PAL OPCDEC trap (privileged func in user mode): GO_PAL(OPCDEC) incl. cpu_clear_lock.
+  static void jit_opcdec(CAlphaCPU* cpu, u64 cpc);
   // Verify support: the interpreter pass records each value it loads, and the
   // compiled pass replays them instead of re-reading memory - false mismatch fix
   bool m_jit_vreplay = false;  // compiled pass: replay recorded loads, don't re-read

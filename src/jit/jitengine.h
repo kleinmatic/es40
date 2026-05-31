@@ -55,6 +55,7 @@ public:
     // For chaining: the budget ceiling and the interrupt-poll flags the compiled epilogue
     // checks before jumping on; link_from is where the epilogue records a link-patch request.
     uint32_t jit_budget, check_int, check_timers, link_from;
+    uint32_t exc_addr, pal_base, sde;   // CALL_PAL: exc_addr save, PAL entry base, PALshadow enable
   };
   void set_offsets(const JitOffsets& o) { m_off = o; }
 
@@ -72,7 +73,7 @@ public:
   }
 
   JitBlock* record(uint64_t virt_pc, uint64_t phys_pc, uint32_t asn, bool asm_global, uint32_t n_instr);
-  void compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper);
+  void compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper);
   void flush();
 
 #ifdef JIT_VERIFY

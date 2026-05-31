@@ -20,6 +20,7 @@ enum SafeOp {
   OP_STQ, OP_STL,                // memory-format stores: MEM[Rb + disp16] = Ra
   OP_LDA, OP_LDAH,               // load-address: Ra = Rb + disp16 (<<16 for LDAH); pure ALU
   OP_JMP,                        // JMP/JSR/RET (0x1a): Ra = PC+4; PC = Rb & ~3 (computed target)
+  OP_CALL_PAL,                   // CALL_PAL (0x00): save R23/exc_addr; PC = pal_base | entry offset
   // Branch-format terminators (contiguous; see is_branch). Conditional on Ra, plus BR/BSR.
   OP_BEQ, OP_BNE, OP_BLT, OP_BLE, OP_BGT, OP_BGE, OP_BLBC, OP_BLBS, OP_BR, OP_BSR
 };
@@ -27,7 +28,7 @@ enum SafeOp {
 static inline bool is_branch(SafeOp op) { return op >= OP_BEQ && op <= OP_BSR; }
 static inline bool is_store(SafeOp op)  { return op == OP_STQ || op == OP_STL; }
 // A terminator ends the block and writes its own next PC (branches + the computed jump).
-static inline bool is_terminator(SafeOp op) { return op == OP_JMP || is_branch(op); }
+static inline bool is_terminator(SafeOp op) { return op == OP_JMP || op == OP_CALL_PAL || is_branch(op); }
 
 // Safe = goto-free, register-only operate-format ops (no trap, memory, or branch).
 SafeOp classify(uint32_t ins)
@@ -61,6 +62,11 @@ SafeOp classify(uint32_t ins)
     case 0x13: // INTM
       if (func == 0x20) return OP_MULQ;
       break;
+    case 0x00: {                // CALL_PAL: compile valid standard funcs (priv 0x00-0x3f, unpriv 0x80-0xbf)
+      const uint32_t fn = ins & 0x1FFFFFFF;
+      if (fn <= 0x3F || (fn >= 0x80 && fn <= 0xBF)) return OP_CALL_PAL;
+      break;                    // SRM specials (0x1234xx) / invalid ranges -> interpret
+    }
     case 0x08: return OP_LDA;   // load address (Ra = Rb + disp16) -- pure ALU, no memory
     case 0x09: return OP_LDAH;  // load address high (Ra = Rb + (disp16 << 16))
     // NOTE: 0x1a (JMP/JSR/RET) intentionally NOT compiled. It's a terminator (can't lengthen
@@ -151,7 +157,7 @@ void CJitEngine::flush()
   }
 }
 
-void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper)
+void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper)
 {
   using namespace asmjit;
   b->compiled = true;
@@ -373,6 +379,40 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       if (ra != 31) { a.mov(x86::rax, imm(ret & ~(uint64_t) 3)); a.mov(reg(ra), x86::rax); }  // return addr = PC & ~3 (DO_JMP)
       a.mov(x86::qword_ptr(x86::rsi, m_off.state_pc), x86::r10);  // state.pc = target
       continue;
+    }
+
+    // CALL_PAL (0x00): vector to the PALcode entry, saving the return address in R23 and the
+    // faulting PC in EXC_ADDR (per ENTER_NATIVE_CALL_PAL). 
+    if (op == OP_CALL_PAL) {
+      const uint32_t func = ins & 0x1FFFFFFF;
+      const uint64_t cpc  = b->tag + 4 * (uint64_t) i;                          // CALL_PAL address
+      const uint64_t ret  = (b->tag + 4 * (uint64_t) (i + 1)) & ~(uint64_t) 2;  // return addr (PC & ~2)
+      const uint64_t voff = (uint64_t) 0x2000 | ((uint64_t) (func & 0x80) << 5)
+                          | ((uint64_t) (func & 0x3f) << 6) | (uint64_t) 1;     // PAL entry offset
+      Label do_vector = a.new_label();
+      if (func < 0x40) {                          // privileged: OPCDEC trap if in user mode (cm != 0)
+        a.cmp(x86::dword_ptr(x86::rsi, m_off.state_cm), imm(0));
+        a.je(do_vector);
+        a.mov(x86::rcx, x86::rsi);                 // cpu
+        a.mov(x86::rdx, imm(cpc));                 // faulting PC (-> EXC_ADDR)
+        a.mov(x86::rax, imm((uint64_t) opcdec_helper));
+        a.call(x86::rax);                          // jit_opcdec: sets state.pc/exc_addr, clears lock
+        a.add(x86::r14d, imm(plen));               // count the block; helper already wrote state.pc
+        a.mov(x86::eax, x86::r14d);
+        a.jmp(done);                               // trap path exits (does not chain)
+      }
+      a.bind(do_vector);
+      a.mov(x86::rax, imm(cpc));                                  // EXC_ADDR = CALL_PAL address
+      a.mov(x86::qword_ptr(x86::rsi, m_off.exc_addr), x86::rax);
+      a.movzx(x86::eax, x86::byte_ptr(x86::rsi, m_off.sde));      // SDE (0/1)
+      a.shl(x86::eax, imm(5));                                    // * 32
+      a.add(x86::eax, imm(23));                                   // R23 index: 23, or 55 if SDE
+      a.mov(x86::rcx, imm(ret));
+      a.mov(x86::qword_ptr(x86::rbx, x86::rax, 3), x86::rcx);     // r[idx] = return address
+      a.mov(x86::r10, x86::qword_ptr(x86::rsi, m_off.pal_base));
+      a.or_(x86::r10, imm(voff));                                 // r10 = pal_base | entry offset
+      a.mov(x86::qword_ptr(x86::rsi, m_off.state_pc), x86::r10);  // state.pc = PAL entry
+      continue;                                                  // -> terminator epilogue chains via r10
     }
 
     // Branch terminators: compute the target into state.pc, then end the block. The
