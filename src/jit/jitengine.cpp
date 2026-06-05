@@ -131,16 +131,35 @@ CJitEngine::~CJitEngine()
   delete (asmjit::JitRuntime*) m_rt;
 }
 
-CJitEngine::JitBlock* CJitEngine::record(uint64_t virt_pc, uint64_t phys_pc, uint32_t asn, bool asm_global, uint32_t n_instr)
+// FNV-1a/64 over a block's source words -- record() uses it to revalidate kept code after a flush
+// instead of recompiling, and to catch self-modifying code (changed bytes -> different hash).
+static inline uint64_t src_hash(const uint8_t* p, uint32_t n_instr)
+{
+  const uint32_t* w = (const uint32_t*) p;
+  uint64_t h = 1469598103934665603ULL;
+  for (uint32_t i = 0; i < n_instr; ++i) { h ^= w[i]; h *= 1099511628211ULL; }
+  return h;
+}
+
+CJitEngine::JitBlock* CJitEngine::record(uint64_t virt_pc, uint64_t phys_pc, uint32_t asn, bool asm_global, uint32_t n_instr, const uint8_t* dram)
 {
   JitBlock& b = m_blocks[index_of(virt_pc)];
-  // Re-seen only if the live physical still matches: virtual+ASN keying can't see a
-  // page remap, so a changed phys means the recorded bytes are stale -- fall through
-  // and re-record (clears code/compiled below, forcing a recompile from the new phys).
+  // Still valid + matching: nothing flushed us since last seen, so the code can't have changed.
   if (b.valid && b.tag == virt_pc && (b.asm_global || b.asn == asn) && b.phys == phys_pc) {
     b.n_instr = n_instr;
     return &b;
   }
+  // Revalidate: a flush cleared valid but kept the compiled code. If the block is unchanged
+  // (tag+phys+asn+len + source hash) reuse it instead of recompiling -- this avoids the recompile
+  // thrash from frequent icache flushes. The hash makes it safe vs self-modifying code (IMB):
+  // changed bytes -> different hash -> recompile below. (b.code != null => compiled from DRAM.)
+  if (b.code && b.tag == virt_pc && (b.asm_global || b.asn == asn) && b.phys == phys_pc
+      && b.n_instr == n_instr && b.src_sum == src_hash(dram + phys_pc, n_instr)) {
+    b.valid = true;
+    b.jit_body = (void*) ((uint8_t*) (void*) b.code + b.body_off);   // restore chained re-entry
+    return &b;
+  }
+  // New block, page remap, or modified bytes: record fresh and force a recompile.
   b.tag = virt_pc;
   b.phys = phys_pc;
   b.asn = asn;
@@ -172,6 +191,21 @@ void CJitEngine::flush()
     delete (asmjit::JitRuntime*) m_rt;
     m_rt = new asmjit::JitRuntime();
     m_code_bytes = 0;
+    // Runtime freed all code -> kept code pointers dangle; null them so revalidate can't reuse them.
+    for (int i = 0; i < kCacheEntries; ++i) { m_blocks[i].code = nullptr; m_blocks[i].compiled = false; }
+  }
+}
+
+// ASM-bit-clear icache flush (process/ASN switch): drop only !asm_global blocks. Global (ASM) PAL
+// blocks are ASN-independent and must survive it. Past the reclaim cap, defer to the full flush().
+void CJitEngine::flush_non_global()
+{
+  if (m_rt && m_code_bytes >= kReclaimBytes) { flush(); return; }
+  for (int i = 0; i < kCacheEntries; ++i) {
+    if (!m_blocks[i].asm_global) {
+      m_blocks[i].valid = false;
+      m_blocks[i].jit_body = nullptr;
+    }
   }
 }
 
@@ -184,9 +218,8 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   if (b->n_instr == 0 || phys + (uint64_t) b->n_instr * 4 > dram_size) return;
   const uint32_t* words = (const uint32_t*) (dram + phys);   // x86 LE == Alpha LE
 
-  // PALmode blocks (PC bit 0) can remap R4-7/R20-23 to the shadow bank (see RREG), so direct
-  // state.r[reg] access isn't valid there. 
-  const bool pal_block = (b->tag & 1) != 0;   // PALmode (PC bit 0); reg() applies the shadow remap
+  // PALmode blocks (PC bit 0) remap R4-7/R20-23 to the shadow bank (see RREG); reg() applies it.
+  const bool pal_block = (b->tag & 1) != 0;
 
   // Stop at the 8 KB page boundary: past it the next instruction's physical
   // address need not be phys+4 (the next virtual page maps elsewhere), so words[]
@@ -323,21 +356,25 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
 #ifdef JIT_VERIFY
       emit_helper();
 #else
-      // Inline fast path: aligned + data_page_cache[0] hit + DRAM. Falls to the helper
-      // on misalign / cache miss / MMIO. Mirrors jit_read's data-cache path. RDX = va
-      // (preserved across the checks); RAX/R10 scratch.
+      // Inline fast path: aligned + data_page_cache[0][dpc_index(va)] hit + DRAM. Falls to the
+      // helper on misalign / cache miss / MMIO. Mirrors jit_read's data-cache path. RDX = va
+      // (preserved); R11 = slot byte offset = dpc_index(va)*stride; RAX/R10 scratch.
       Label slow  = a.new_label();
       Label ldone = a.new_label();
       a.test(x86::dl, imm(amask));                                      a.jnz(slow);
+      a.mov(x86::r11, x86::rdx);
+      a.shr(x86::r11, imm(13));
+      a.and_(x86::r11, imm(m_off.dpc_mask));                            // r11 = dpc_index(va)
+      a.imul(x86::r11, x86::r11, imm(m_off.dpc_stride));                // r11 = slot byte offset
       a.mov(x86::r10, x86::rdx);
       a.and_(x86::r10, imm(-0x2000));                                   // r10 = va & ~0x1FFF
-      a.cmp(x86::byte_ptr(x86::rsi, m_off.dpc_valid), imm(0));          a.je(slow);
-      a.cmp(x86::qword_ptr(x86::rsi, m_off.dpc_virt_page), x86::r10);   a.jne(slow);
+      a.cmp(x86::byte_ptr(x86::rsi, x86::r11, 0, m_off.dpc_valid), imm(0));         a.je(slow);
+      a.cmp(x86::qword_ptr(x86::rsi, x86::r11, 0, m_off.dpc_virt_page), x86::r10);  a.jne(slow);
       a.mov(x86::eax, x86::dword_ptr(x86::rsi, m_off.state_cm));
-      a.cmp(x86::dword_ptr(x86::rsi, m_off.dpc_cm), x86::eax);          a.jne(slow);
+      a.cmp(x86::dword_ptr(x86::rsi, x86::r11, 0, m_off.dpc_cm), x86::eax);         a.jne(slow);
       a.mov(x86::eax, x86::dword_ptr(x86::rsi, m_off.state_asn0));
-      a.cmp(x86::dword_ptr(x86::rsi, m_off.dpc_asn), x86::eax);         a.jne(slow);
-      a.mov(x86::rax, x86::qword_ptr(x86::rsi, m_off.dpc_phys_base));
+      a.cmp(x86::dword_ptr(x86::rsi, x86::r11, 0, m_off.dpc_asn), x86::eax);        a.jne(slow);
+      a.mov(x86::rax, x86::qword_ptr(x86::rsi, x86::r11, 0, m_off.dpc_phys_base));
       a.mov(x86::r10, x86::rdx);
       a.and_(x86::r10, imm(0x1FFF));
       a.or_(x86::rax, x86::r10);                                        // rax = phys
@@ -616,6 +653,8 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   if (((JitRuntime*) m_rt)->add(&fn, &code) != Error::kOk) return;
   b->code = fn;
   b->jit_body = (void*) ((uint8_t*) (void*) fn + body_off);   // chained re-entry (past prologue)
+  b->body_off = (uint32_t) body_off;                          // to restore jit_body on revalidate
+  b->src_sum  = src_hash(dram + phys, b->n_instr);            // source fingerprint (revalidate vs self-mod)
   b->prefix_len = plen;
   m_code_bytes += csz;   // track for the reclaim threshold (see flush())
 #ifdef JIT_STATS

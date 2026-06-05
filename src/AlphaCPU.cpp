@@ -444,11 +444,15 @@ void CAlphaCPU::init()
 		// Tell the JIT the byte offsets (from `this`) of the fields its inline load
 		// fast path reads, so compiled code can address them via [cpu + offset].
 		CJitEngine::JitOffsets o;
-		o.dpc_valid     = (uint32_t) ((char*) &data_page_cache[0].valid     - (char*) this);
-		o.dpc_virt_page = (uint32_t) ((char*) &data_page_cache[0].virt_page - (char*) this);
-		o.dpc_phys_base = (uint32_t) ((char*) &data_page_cache[0].phys_base - (char*) this);
-		o.dpc_cm        = (uint32_t) ((char*) &data_page_cache[0].cm        - (char*) this);
-		o.dpc_asn       = (uint32_t) ((char*) &data_page_cache[0].asn       - (char*) this);
+		// Slot [0][0] of the read cache; the inline load adds dpc_index(va)*dpc_stride to reach
+		// the indexed slot, so these are the base (slot 0) field offsets.
+		o.dpc_valid     = (uint32_t) ((char*) &data_page_cache[0][0].valid     - (char*) this);
+		o.dpc_virt_page = (uint32_t) ((char*) &data_page_cache[0][0].virt_page - (char*) this);
+		o.dpc_phys_base = (uint32_t) ((char*) &data_page_cache[0][0].phys_base - (char*) this);
+		o.dpc_cm        = (uint32_t) ((char*) &data_page_cache[0][0].cm        - (char*) this);
+		o.dpc_asn       = (uint32_t) ((char*) &data_page_cache[0][0].asn       - (char*) this);
+		o.dpc_stride    = (uint32_t) sizeof(data_page_cache[0][0]);
+		o.dpc_mask      = (uint32_t) kDpcMask;
 		o.state_cm      = (uint32_t) ((char*) &state.cm   - (char*) this);
 		o.state_asn0    = (uint32_t) ((char*) &state.asn0 - (char*) this);
 		o.dram_ptr      = (uint32_t) ((char*) &dram_ptr   - (char*) this);
@@ -715,6 +719,14 @@ void CAlphaCPU::jit_flush_blocks()
 		m_jit->flush();
 }
 
+// ASM-bit-clear icache flush (process/ASN switch, ITB_IAP): keep the global PAL blocks compiled
+// instead of recompiling them on every such flush (the dominant JIT cost in PAL-heavy code).
+void CAlphaCPU::jit_flush_blocks_asm()
+{
+	if (m_jit)
+		m_jit->flush_non_global();
+}
+
 void CAlphaCPU::jit_run(int budget)
 {
 	const auto now = std::chrono::steady_clock::now();
@@ -951,7 +963,7 @@ void CAlphaCPU::jit_run(int budget)
 #endif
 		if (state.pc != expected)
 		{
-			CJitEngine::JitBlock* nb = m_jit->record(start_virt, start_phys, start_asn, start_asm, n);
+			CJitEngine::JitBlock* nb = m_jit->record(start_virt, start_phys, start_asn, start_asm, n, (const uint8_t*) dram_ptr);
 			if (!nb->compiled)
 				m_jit->compile_block(nb, (const uint8_t*) dram_ptr, dram_size,
 				                     (void*) &CAlphaCPU::jit_read, (void*) &CAlphaCPU::jit_write,
@@ -970,12 +982,10 @@ int CAlphaCPU::jit_read(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 
 	u64 phys;
 	const u64 vp = va & ~U64(0x1FFF);
-	if (cpu->data_page_cache[0].valid
-	    && cpu->data_page_cache[0].virt_page == vp
-	    && cpu->data_page_cache[0].cm  == cpu->state.cm
-	    && cpu->data_page_cache[0].asn == cpu->state.asn0)
+	SDataPageCache& dpc = cpu->data_page_cache[0][dpc_index(va)];   // direct-mapped by virt page
+	if (dpc.valid && dpc.virt_page == vp && dpc.cm == cpu->state.cm && dpc.asn == cpu->state.asn0)
 	{
-		phys = cpu->data_page_cache[0].phys_base | (va & U64(0x1FFF));
+		phys = dpc.phys_base | (va & U64(0x1FFF));
 	}
 	else
 	{
@@ -990,11 +1000,11 @@ int CAlphaCPU::jit_read(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 		if (!e.access[0][cpu->state.cm]) return 1;                            // protection (ACV)
 		if (e.fault[0]) return 1;                                             // fault-on-read (FOR)
 		phys = e.phys | (va & e.keep_mask);
-		cpu->data_page_cache[0].virt_page = vp;
-		cpu->data_page_cache[0].phys_base = phys & ~U64(0x1FFF);
-		cpu->data_page_cache[0].cm  = cpu->state.cm;
-		cpu->data_page_cache[0].asn = cpu->state.asn0;
-		cpu->data_page_cache[0].valid = true;
+		dpc.virt_page = vp;
+		dpc.phys_base = phys & ~U64(0x1FFF);
+		dpc.cm  = cpu->state.cm;
+		dpc.asn = cpu->state.asn0;
+		dpc.valid = true;
 	}
 
 	// Verify replay: return the value the interpreter pass loaded here, rather than
@@ -1012,10 +1022,10 @@ int CAlphaCPU::jit_read(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 		return 0;
 	}
 
-	if (phys < cpu->dram_size)
-		*out = dram_read(cpu->dram_ptr, phys, size_bits);
-	else
-		*out = cpu->cSystem->ReadMem(phys, size_bits, cpu);
+	// DRAM only: bail on MMIO so the interpreter does device reads (side effects + ordering).
+	if (phys >= cpu->dram_size)
+		return 1;
+	*out = dram_read(cpu->dram_ptr, phys, size_bits);
 	return 0;
 }
 
@@ -1045,12 +1055,10 @@ int CAlphaCPU::jit_write(CAlphaCPU* cpu, u64 va, int size_bits, u64 value)
 
 	u64 phys;
 	const u64 vp = va & ~U64(0x1FFF);
-	if (cpu->data_page_cache[1].valid
-	    && cpu->data_page_cache[1].virt_page == vp
-	    && cpu->data_page_cache[1].cm  == cpu->state.cm
-	    && cpu->data_page_cache[1].asn == cpu->state.asn0)
+	SDataPageCache& dpc = cpu->data_page_cache[1][dpc_index(va)];   // direct-mapped by virt page
+	if (dpc.valid && dpc.virt_page == vp && dpc.cm == cpu->state.cm && dpc.asn == cpu->state.asn0)
 	{
-		phys = cpu->data_page_cache[1].phys_base | (va & U64(0x1FFF));
+		phys = dpc.phys_base | (va & U64(0x1FFF));
 	}
 	else
 	{
@@ -1063,11 +1071,11 @@ int CAlphaCPU::jit_write(CAlphaCPU* cpu, u64 va, int size_bits, u64 value)
 		if (!e.access[1][cpu->state.cm]) return 1;                            // protection (ACV)
 		if (e.fault[1]) return 1;                                             // fault-on-write (FOW)
 		phys = e.phys | (va & e.keep_mask);
-		cpu->data_page_cache[1].virt_page = vp;
-		cpu->data_page_cache[1].phys_base = phys & ~U64(0x1FFF);
-		cpu->data_page_cache[1].cm  = cpu->state.cm;
-		cpu->data_page_cache[1].asn = cpu->state.asn0;
-		cpu->data_page_cache[1].valid = true;
+		dpc.virt_page = vp;
+		dpc.phys_base = phys & ~U64(0x1FFF);
+		dpc.cm  = cpu->state.cm;
+		dpc.asn = cpu->state.asn0;
+		dpc.valid = true;
 	}
 
 	if (phys < cpu->dram_size)

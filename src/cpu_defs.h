@@ -543,20 +543,20 @@ inline u64 fsqrt64(u64 asig, s32 exp)
          address space). */                                                     \
       int _dpc_rw = (flags) & ACCESS_WRITE;                                     \
       u64 _dpc_vp = _dpc_va & ~U64(0x1FFF);                                     \
-      if (data_page_cache[_dpc_rw].valid                                        \
-          && data_page_cache[_dpc_rw].virt_page == _dpc_vp                      \
-          && data_page_cache[_dpc_rw].cm  == state.cm                          \
-          && data_page_cache[_dpc_rw].asn == state.asn0) {                      \
-        phys_address = data_page_cache[_dpc_rw].phys_base                       \
-                     | (_dpc_va & U64(0x1FFF));                                 \
+      SDataPageCache& _dpc = data_page_cache[_dpc_rw][dpc_index(_dpc_va)];      \
+      if (_dpc.valid                                                            \
+          && _dpc.virt_page == _dpc_vp                                          \
+          && _dpc.cm  == state.cm                                              \
+          && _dpc.asn == state.asn0) {                                          \
+        phys_address = _dpc.phys_base | (_dpc_va & U64(0x1FFF));                \
       } else {                                                                  \
         if (virt2phys(_dpc_va, &phys_address, flags, NULL, ins))                \
           ES40_EXECUTE_END();                                                   \
-        data_page_cache[_dpc_rw].virt_page = _dpc_vp;                           \
-        data_page_cache[_dpc_rw].phys_base = phys_address & ~U64(0x1FFF);       \
-        data_page_cache[_dpc_rw].cm        = state.cm;                          \
-        data_page_cache[_dpc_rw].asn       = state.asn0;                        \
-        data_page_cache[_dpc_rw].valid     = true;                              \
+        _dpc.virt_page = _dpc_vp;                                               \
+        _dpc.phys_base = phys_address & ~U64(0x1FFF);                           \
+        _dpc.cm        = state.cm;                                              \
+        _dpc.asn       = state.asn0;                                            \
+        _dpc.valid     = true;                                                  \
       }                                                                         \
     } else {                                                                    \
       /* PAL privileged access (NO_CHECK, VPTE, ALT, etc) — skip cache */       \

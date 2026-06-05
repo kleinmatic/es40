@@ -467,19 +467,25 @@ private:
     seq_remaining = 0;
   }
   
-  // Data page translation cache
-  // Caches last data virt->phys translation per read/write.
+  // Data page translation cache: direct-mapped by virtual page (kDpcEntries slots/dir) so a
+  // multi-page access pattern doesn't thrash a single slot. The inline load checks one slot.
+  static constexpr int kDpcBits    = 6;                  // 64 slots/dir (8KB pages -> 512KB)
+  static constexpr int kDpcEntries = 1 << kDpcBits;
+  static constexpr u64 kDpcMask    = (u64) kDpcEntries - 1;
+  static inline u64 dpc_index(u64 va) { return (va >> 13) & kDpcMask; }
   struct SDataPageCache {
     u64  virt_page;   // va & ~0x1FFF
     u64  phys_base;   // pa & ~0x1FFF
     int  cm;          // current mode (CM) at fill time
     int  asn;         // data ASN (asn0) at fill time
     bool valid;
-  } data_page_cache[2];  // [0]=read, [1]=write
+  } data_page_cache[2][kDpcEntries];  // [rw][dpc_index(va)]; [0]=read, [1]=write
 
   inline void flush_data_page_cache() {
-    data_page_cache[0].valid = false;
-    data_page_cache[1].valid = false;
+    for (int i = 0; i < kDpcEntries; i++) {
+      data_page_cache[0][i].valid = false;
+      data_page_cache[1][i].valid = false;
+    }
   }
 
 #ifdef ES40_JIT
@@ -489,6 +495,7 @@ private:
   void* m_link_from = nullptr; // JitBlock* whose successor link the dispatcher should patch
   void jit_run(int budget);    // drives the ES40_JIT lane via the interpreter
   void jit_flush_blocks();     // invalidate all discovered JIT blocks
+  void jit_flush_blocks_asm(); // invalidate only !asm_global blocks (preserve global PAL across ASN flush)
   // Compiled-block memory helpers: load size_bits from va into *out / store value to va.
   // Return 0 on success, 1 on fault/unaligned (caller bails to the interpreter).
   static int jit_read(CAlphaCPU* cpu, u64 va, int size_bits, u64* out);
@@ -669,7 +676,7 @@ inline void CAlphaCPU::flush_icache_asm()
   }
   break_seq_icache();
 #ifdef ES40_JIT
-  jit_flush_blocks();
+  jit_flush_blocks_asm();   // preserve global (ASM-bit) JIT blocks, matching the icache ASM-bit rule
 #endif
 }
 

@@ -45,12 +45,15 @@ public:
     JitBlock* link;       // cached successor block (back-patched by the dispatcher); null = none
     uint32_t prefix_len;  // # safe ALU ops in code
     bool     compiled;    // compile has been attempted
+    uint32_t body_off;    // jit_body's offset within code -- restores the chained entry on revalidate
+    uint64_t src_sum;     // hash of the n_instr source words at compile time (revalidate vs self-mod)
   };
 
   // Byte offsets (from the CAlphaCPU*) of the fields the inline load fast path reads,
   // so compiled code can touch them via [rsi + offset]. Filled once by set_offsets().
   struct JitOffsets {
-    uint32_t dpc_valid, dpc_virt_page, dpc_phys_base, dpc_cm, dpc_asn;
+    uint32_t dpc_valid, dpc_virt_page, dpc_phys_base, dpc_cm, dpc_asn;  // offsets of slot [0][0]
+    uint32_t dpc_stride, dpc_mask;   // direct-mapped page cache: per-slot byte stride, index mask
     uint32_t state_cm, state_asn0, dram_ptr, dram_size, state_pc;
     // For chaining: the budget ceiling and the interrupt-poll flags the compiled epilogue
     // checks before jumping on; link_from is where the epilogue records a link-patch request.
@@ -72,9 +75,10 @@ public:
     return (b.valid && b.tag == virt_pc && (b.asm_global || b.asn == asn)) ? &b : nullptr;
   }
 
-  JitBlock* record(uint64_t virt_pc, uint64_t phys_pc, uint32_t asn, bool asm_global, uint32_t n_instr);
+  JitBlock* record(uint64_t virt_pc, uint64_t phys_pc, uint32_t asn, bool asm_global, uint32_t n_instr, const uint8_t* dram);
   void compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper);
   void flush();
+  void flush_non_global();   // flush only !asm_global blocks (the ASM-bit-clear / ASN icache flush)
 
 #ifdef JIT_VERIFY
   // Differential check: compiled result (jit) vs interpreter result (interp), r[0..30].
