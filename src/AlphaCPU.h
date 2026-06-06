@@ -503,6 +503,7 @@ private:
   static int jit_read_locked(CAlphaCPU* cpu, u64 va, int size_bits, u64* out);  // LDx_L: load + establish LL/SC lock
   static int jit_write(CAlphaCPU* cpu, u64 va, int size_bits, u64 value);
   static int jit_write_phys(CAlphaCPU* cpu, u64 phys, int size_bits, u64 value);  // HW_ST physical: no translation
+  static u64 jit_stc(CAlphaCPU* cpu, u64 va, int size_bits, u64 value);           // STx_C: store-conditional
   // CALL_PAL OPCDEC trap (privileged func in user mode): GO_PAL(OPCDEC) incl. cpu_clear_lock.
   static void jit_opcdec(CAlphaCPU* cpu, u64 cpc);
   // HW_MFPR (PALmode): return the IPR named in ins; the caller (compiled codegen) writes Ra.
@@ -522,6 +523,7 @@ private:
   u32  m_jit_slog_i  = 0;      // store-compare cursor
   u64  m_jit_slog_addr[64];    // store addresses the interpreter pass wrote
   u64  m_jit_slog_val[64];     // store values the interpreter pass wrote
+  u64  m_jit_slog_success[64]; // STx_C outcome (1/0) the interp pass got; 1 for ordinary stores
 #endif
 
   /// The state structure contains all elements that need to be saved to the statefile

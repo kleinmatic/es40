@@ -22,6 +22,7 @@ enum SafeOp {
   OP_LDQ, OP_LDL,                // memory-format loads: Ra = MEM[Rb + disp16]
   OP_LDBU, OP_LDWU,              // BWX byte/word loads (0x0a/0x0c): Ra = zero-extend MEM[Rb+disp16].{b,w}
   OP_LDL_L, OP_LDQ_L,            // load-locked (0x2a/0x2b): Ra = MEM[Rb+disp16] + establish LL/SC monitor
+  OP_STL_C, OP_STQ_C,            // store-conditional (0x2e/0x2f): cond store Ra -> MEM; Ra = success(1)/fail(0)
   OP_STQ, OP_STL,                // memory-format stores: MEM[Rb + disp16] = Ra
   OP_STB, OP_STW,                // BWX byte/word stores (0x0e/0x0d): MEM[Rb + disp16].{b,w} = Ra
   OP_LDA, OP_LDAH,               // load-address: Ra = Rb + disp16 (<<16 for LDAH); pure ALU
@@ -157,6 +158,11 @@ SafeOp classify(uint32_t ins, bool pal_block)
     case 0x2d: return OP_STQ;
     case 0x0e: return OP_STB;   // BWX byte/word stores (MEM[Rb+disp16].{b,w} = Ra low bits)
     case 0x0d: return OP_STW;
+    case 0x2e:                  // STL_C / STQ_C: the store-conditional half of LL/SC. Ra is both the
+    case 0x2f:                  // value AND the success/fail dest. Compile Ra!=31 (Ra==31 discards the
+      // result into R31, so the verify can't capture it from a GPR); interpret those.
+      if (((ins >> 21) & 0x1f) == 31) return OP_NONE;
+      return (opcode == 0x2e) ? OP_STL_C : OP_STQ_C;
     // Branch format: opcode | Ra | disp21. Conditional on Ra, plus BR/BSR.
     case 0x30: return OP_BR;    case 0x34: return OP_BSR;
     case 0x38: return OP_BLBC;  case 0x39: return OP_BEQ;
@@ -283,7 +289,7 @@ static const bool g_zapnot_init = [] {
   return true;
 }();
 
-void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper, void* hw_ld_helper, void* hw_mtpr_helper, void* hw_st_helper, void* indirect_helper, void* read_locked_helper)
+void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper, void* hw_ld_helper, void* hw_mtpr_helper, void* hw_st_helper, void* indirect_helper, void* read_locked_helper, void* stc_helper)
 {
   using namespace asmjit;
   b->compiled = true;
@@ -496,6 +502,31 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       a.add(x86::eax, x86::r14d);                                      // + earlier chained iterations
       a.jmp(done);
       a.bind(ok);
+      continue;
+    }
+
+    // Store-conditional STL_C/STQ_C (0x2e/0x2f): conditionally store Ra; Ra = 1 (success) / 0 (fail).
+    // jit_stc consumes the LL monitor + does the host CAS (production), or compares against the
+    // interpreter's logged outcome (verify). 
+    if (op == OP_STL_C || op == OP_STQ_C) {
+      const int disp = (int) (int16_t) (ins & 0xFFFF);
+      const int size_bits = (op == OP_STQ_C) ? 64 : 32;
+      if (rb == 31)  a.mov(x86::rdx, imm(disp));                       // va -> RDX
+      else        {  a.mov(x86::rdx, reg(rb)); if (disp) a.add(x86::rdx, imm(disp)); }
+      a.mov(x86::r9, reg(ra));                                         // value (Ra) -> R9
+      a.mov(x86::rcx, x86::rsi);                                       // cpu
+      a.mov(x86::r8d, imm(size_bits));                                 // size in bits
+      a.mov(x86::rax, imm((uint64_t) stc_helper));
+      a.call(x86::rax);                                               // jit_stc(cpu, va, size, value)
+      Label nobail = a.new_label();
+      a.test(x86::eax, imm(0x100));                                   // 0x100 = translation-fault bail
+      a.jz(nobail);
+      set_pc(b->tag + 4 * (uint64_t) i);                              // resume at the faulting STx_C
+      a.mov(x86::eax, imm(i));
+      a.add(x86::eax, x86::r14d);
+      a.jmp(done);
+      a.bind(nobail);
+      a.mov(reg(ra), x86::rax);                                       // Ra = success(1) / fail(0)
       continue;
     }
 

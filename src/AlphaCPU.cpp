@@ -824,8 +824,9 @@ void CAlphaCPU::jit_run(int budget)
 				// Stores touch memory, not GPRs, so record (addr,value) for the compiled-pass
 				// compare. Ra (lra) is the value source; Rb is the base. HW_ST physical (0x1f func
 				// 0/1) stores too, with a physical (untranslated) address and a 12-bit disp.
+				const bool is_sc   = (opc == 0x2e || opc == 0x2f);   // STL_C/STQ_C: store-conditional (success in Ra)
 				const bool is_hwst = (opc == 0x1f) && (((ins >> 12) & 0xf) <= 1);
-				const bool isst = (opc == 0x2c || opc == 0x2d || opc == 0x0d || opc == 0x0e || is_hwst);  // STL/STQ/STW/STB
+				const bool isst = (opc == 0x2c || opc == 0x2d || opc == 0x0d || opc == 0x0e || is_sc || is_hwst);  // +STx_C
 				u64 sva = 0, sval = 0;
 				if (isst)
 				{
@@ -890,6 +891,7 @@ void CAlphaCPU::jit_run(int budget)
 				{
 					m_jit_slog_addr[sn] = sva;
 					m_jit_slog_val[sn]  = sval;
+					m_jit_slog_success[sn] = is_sc ? state.r[RREG(lra)] : (u64) 1;   // STx_C result (post-execute); ordinary store = 1
 					sn++;
 				}
 			}
@@ -1000,7 +1002,7 @@ void CAlphaCPU::jit_run(int budget)
 				                     (void*) &CAlphaCPU::jit_opcdec, (void*) &CAlphaCPU::jit_hw_mfpr,
 				                     (void*) &CAlphaCPU::jit_read_phys, (void*) &CAlphaCPU::jit_hw_mtpr,
 				                     (void*) &CAlphaCPU::jit_write_phys, (void*) &CAlphaCPU::jit_indirect,
-				                     (void*) &CAlphaCPU::jit_read_locked);
+				                     (void*) &CAlphaCPU::jit_read_locked, (void*) &CAlphaCPU::jit_stc);
 		}
 	}
 }
@@ -1233,6 +1235,63 @@ int CAlphaCPU::jit_write_phys(CAlphaCPU* cpu, u64 phys, int size_bits, u64 value
 		return 1;                              // MMIO: let the interpreter do the ordered write
 	dram_write(cpu->dram_ptr, phys, size_bits, value);
 	return 0;
+}
+
+// JIT store-conditional helper (static). STx_C: consume the LL exclusive monitor + (if still held)
+// the host CAS, returning 1 (success) / 0 (fail) for Ra. 
+u64 CAlphaCPU::jit_stc(CAlphaCPU* cpu, u64 va, int size_bits, u64 value)
+{
+	if (cpu->m_jit_vreplay)
+	{
+		const u32 i = cpu->m_jit_slog_i++;
+		const u64 success = cpu->m_jit_slog_success[i];
+		if (va != cpu->m_jit_slog_addr[i] || (success && value != cpu->m_jit_slog_val[i]))
+		{
+			static int n = 0;
+			if (n++ < 50)
+				printf("[JIT] STx_C MISMATCH: compiled va=%016llx val=%016llx ok=%llu  interp va=%016llx val=%016llx\n",
+				       (unsigned long long) va, (unsigned long long) value, (unsigned long long) success,
+				       (unsigned long long) cpu->m_jit_slog_addr[i], (unsigned long long) cpu->m_jit_slog_val[i]);
+		}
+		return success;
+	}
+
+	const u64 amask = (u64) (size_bits / 8) - 1;
+	if (va & amask) return U64(0x100);        // unaligned (also a page-cross): the interpreter handles it
+
+	// Side-effect-free write-path translation (mirror jit_write); bail to the interpreter on a TB
+	// miss / protection / fault-on-write so it does the side-effecting translation.
+	u64 phys;
+	const u64 vp = va & ~U64(0x1FFF);
+	SDataPageCache& dpc = cpu->data_page_cache[1][dpc_index(va)];
+	if (dpc.valid && dpc.virt_page == vp && dpc.cm == cpu->state.cm && dpc.asn == cpu->state.asn0)
+	{
+		phys = dpc.phys_base | (va & U64(0x1FFF));
+	}
+	else
+	{
+		const int i = cpu->FindTBEntry(va, ACCESS_WRITE);
+		if (i < 0) return U64(0x100);                                        // TB miss
+		const auto& e = cpu->state.tb[TB_INDEX_DATA][i];
+		if (!e.access[1][cpu->state.cm]) return U64(0x100);                  // protection (ACV)
+		if (e.fault[1]) return U64(0x100);                                   // fault-on-write (FOW)
+		phys = e.phys | (va & e.keep_mask);
+		dpc.virt_page = vp;
+		dpc.phys_base = phys & ~U64(0x1FFF);
+		dpc.cm  = cpu->state.cm;
+		dpc.asn = cpu->state.asn0;
+		dpc.valid = true;
+	}
+
+	// The store-conditional (mirror WRITE_VIRT_COND): consume the monitor; if still held, CAS DRAM
+	// (or WriteMem for MMIO). cpu_take_lock always consumes the lock, success or fail.
+	u64 expected = 0;
+	if (!cpu->cSystem->cpu_take_lock(cpu->state.iProcNum, phys, &expected))
+		return 0;                                            // lock lost -> SC fails
+	if (phys < cpu->dram_size)
+		return dram_cas(cpu->dram_ptr, phys, expected, value, size_bits) ? 1 : 0;
+	cpu->cSystem->WriteMem(phys, size_bits, value, cpu);     // MMIO conditional store
+	return 1;
 }
 
 /* CALL_PAL OPCDEC trap: a privileged function (< 0x40) attempted in user mode. Mirrors
