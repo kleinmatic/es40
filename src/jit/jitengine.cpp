@@ -14,6 +14,7 @@ enum SafeOp {
   OP_ADDQ, OP_SUBQ, OP_ADDL, OP_SUBL,
   OP_S4ADDQ, OP_S8ADDQ, OP_S4SUBQ, OP_S8SUBQ,
   OP_AND, OP_BIS, OP_XOR, OP_BIC, OP_ORNOT, OP_EQV,
+  OP_CMOV,                       // INTL (0x11) conditional moves CMOVxx: Rc = cond(Ra) ? op2 : Rc
   OP_CMPEQ, OP_CMPLT, OP_CMPLE, OP_CMPULT, OP_CMPULE,
   OP_SLL, OP_SRL, OP_SRA, OP_MULQ,
   OP_NOP, OP_MFENCE,             // MISC (0x18): prefetch/cache hints (no-op), barriers (mfence)
@@ -59,6 +60,9 @@ SafeOp classify(uint32_t ins, bool pal_block)
         case 0x00: return OP_AND;   case 0x20: return OP_BIS;
         case 0x40: return OP_XOR;   case 0x08: return OP_BIC;
         case 0x28: return OP_ORNOT; case 0x48: return OP_EQV;
+        case 0x14: case 0x16: case 0x24: case 0x26:   // CMOVLBS/LBC/EQ/NE
+        case 0x44: case 0x46: case 0x64: case 0x66:   // CMOVLT/GE/LE/GT
+          return OP_CMOV;
       }
       break;
     case 0x12: // INTS
@@ -628,6 +632,31 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
         }
       }
       a.mov(x86::qword_ptr(x86::rsi, m_off.state_pc), x86::r10);
+      continue;
+    }
+
+    // INTL conditional moves (CMOVxx): Rc = cond(Ra) ? op2 : Rc. Same condition tests as the
+    // matching branches; op2 (Rb or literal) moves into Rc only when the condition holds, so the
+    // current Rc is read and kept otherwise. R31 dest discards the result.
+    if (op == OP_CMOV) {
+      if (rc == 31) continue;
+      const uint32_t f = (ins >> 5) & 0x7f;
+      op1_rax();                                  // rax = Ra (condition operand)
+      op2_rcx();                                  // rcx = op2 (Rb or literal -- the moved value)
+      a.mov(x86::r10, reg(rc));                   // r10 = current Rc (kept when the condition fails)
+      if (f == 0x14 || f == 0x16) a.test(x86::rax, imm(1));    // CMOVLBS/LBC: test the low bit
+      else                        a.test(x86::rax, x86::rax);  // others: test the full value
+      switch (f) {
+        case 0x24: a.cmovz(x86::r10, x86::rcx);  break;   // CMOVEQ  (Ra == 0)
+        case 0x26: a.cmovnz(x86::r10, x86::rcx); break;   // CMOVNE  (Ra != 0)
+        case 0x44: a.cmovs(x86::r10, x86::rcx);  break;   // CMOVLT  (Ra <  0)
+        case 0x46: a.cmovns(x86::r10, x86::rcx); break;   // CMOVGE  (Ra >= 0)
+        case 0x64: a.cmovle(x86::r10, x86::rcx); break;   // CMOVLE  (Ra <= 0)
+        case 0x66: a.cmovg(x86::r10, x86::rcx);  break;   // CMOVGT  (Ra >  0)
+        case 0x14: a.cmovnz(x86::r10, x86::rcx); break;   // CMOVLBS (Ra & 1)
+        case 0x16: a.cmovz(x86::r10, x86::rcx);  break;   // CMOVLBC (!(Ra & 1))
+      }
+      a.mov(reg(rc), x86::r10);
       continue;
     }
 
