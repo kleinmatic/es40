@@ -812,7 +812,7 @@ void CAlphaCPU::jit_run(int budget)
 				// this same vlog, but its address is physical (untranslated) with a 12-bit disp.
 				const bool is_hwld = (opc == 0x1b) && (((ins >> 12) & 0xf) <= 1);
 				const bool isld = (opc == 0x28 || opc == 0x29 || opc == 0x0a || opc == 0x0c
-				                   || opc == 0x2a || opc == 0x2b || is_hwld) && lra != 31;  // +LDBU/LDWU +LDL_L/LDQ_L
+				                   || opc == 0x2a || opc == 0x2b || opc == 0x0b || is_hwld) && lra != 31;  // +LDBU/LDWU +LDx_L +LDQ_U
 				u64 eva = 0;
 				if (isld)
 				{
@@ -820,13 +820,14 @@ void CAlphaCPU::jit_run(int budget)
 					const int ldisp = is_hwld ? (int) ((int32_t) (ins << 20) >> 20)   // HW_LD: 12-bit
 					                          : (int) (int16_t) (ins & 0xFFFF);        // LDx:   16-bit
 					eva = (lrb == 31 ? (u64) 0 : state.r[RREG(lrb)]) + (u64) ldisp;
+					if (opc == 0x0b) eva &= ~U64(7);   // LDQ_U: address forced to 8-byte alignment
 				}
 				// Stores touch memory, not GPRs, so record (addr,value) for the compiled-pass
 				// compare. Ra (lra) is the value source; Rb is the base. HW_ST physical (0x1f func
 				// 0/1) stores too, with a physical (untranslated) address and a 12-bit disp.
 				const bool is_sc   = (opc == 0x2e || opc == 0x2f);   // STL_C/STQ_C: store-conditional (success in Ra)
 				const bool is_hwst = (opc == 0x1f) && (((ins >> 12) & 0xf) <= 1);
-				const bool isst = (opc == 0x2c || opc == 0x2d || opc == 0x0d || opc == 0x0e || is_sc || is_hwst);  // +STx_C
+				const bool isst = (opc == 0x2c || opc == 0x2d || opc == 0x0d || opc == 0x0e || opc == 0x0f || is_sc || is_hwst);  // +STx_C +STQ_U
 				u64 sva = 0, sval = 0;
 				if (isst)
 				{
@@ -834,6 +835,7 @@ void CAlphaCPU::jit_run(int budget)
 					const int sdisp = is_hwst ? (int) ((int32_t) (ins << 20) >> 20)   // HW_ST: 12-bit
 					                          : (int) (int16_t) (ins & 0xFFFF);        // STx:   16-bit
 					sva  = (srb == 31 ? (u64) 0 : state.r[RREG(srb)]) + (u64) sdisp;
+					if (opc == 0x0f) sva &= ~U64(7);   // STQ_U: address forced to 8-byte alignment
 					sval = (lra == 31 ? (u64) 0 : state.r[RREG(lra)]);
 				}
 				// Computed jump (JMP/JSR/RET): target = Rb & ~3, taken before execute() (the

@@ -25,6 +25,7 @@ enum SafeOp {
   OP_STL_C, OP_STQ_C,            // store-conditional (0x2e/0x2f): cond store Ra -> MEM; Ra = success(1)/fail(0)
   OP_STQ, OP_STL,                // memory-format stores: MEM[Rb + disp16] = Ra
   OP_STB, OP_STW,                // BWX byte/word stores (0x0e/0x0d): MEM[Rb + disp16].{b,w} = Ra
+  OP_LDQ_U, OP_STQ_U,            // unaligned quad (0x0b/0x0f): MEM[(Rb+disp16) & ~7] load/store
   OP_LDA, OP_LDAH,               // load-address: Ra = Rb + disp16 (<<16 for LDAH); pure ALU
   OP_HW_MFPR,                    // HW_MFPR (0x19), PALmode only: Ra = IPR[(ins>>8)&0xff] via helper
   OP_HW_LDL, OP_HW_LDQ,          // HW_LD (0x1b) physical func 0/1, PALmode only: Ra = phys[Rb+disp12]
@@ -149,6 +150,7 @@ SafeOp classify(uint32_t ins, bool pal_block)
     case 0x29: return OP_LDQ;
     case 0x0a: return OP_LDBU;  // BWX byte/word loads (Ra = zero-extend MEM[Rb+disp16].{b,w})
     case 0x0c: return OP_LDWU;
+    case 0x0b: return OP_LDQ_U;  // unaligned quad load: Ra = MEM[(Rb+disp16) & ~7]
     case 0x2a:                  // LDL_L / LDQ_L: the load-locked half of LL/SC. Compile the value-
     case 0x2b:                  // returning forms only -- Ra==31 (lock without consuming the value)
       // leaves the loaded value out of the GPRs, so the verify can't replay it; interpret those.
@@ -158,6 +160,7 @@ SafeOp classify(uint32_t ins, bool pal_block)
     case 0x2d: return OP_STQ;
     case 0x0e: return OP_STB;   // BWX byte/word stores (MEM[Rb+disp16].{b,w} = Ra low bits)
     case 0x0d: return OP_STW;
+    case 0x0f: return OP_STQ_U;  // unaligned quad store: MEM[(Rb+disp16) & ~7] = Ra
     case 0x2e:                  // STL_C / STQ_C: the store-conditional half of LL/SC. Ra is both the
     case 0x2f:                  // value AND the success/fail dest. Compile Ra!=31 (Ra==31 discards the
       // result into R31, so the verify can't capture it from a GPR); interpret those.
@@ -407,13 +410,14 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     };
 
     // Memory-format loads: va = regs[Rb] + disp16.
-    if (op == OP_LDQ || op == OP_LDL || op == OP_LDBU || op == OP_LDWU) {
+    if (op == OP_LDQ || op == OP_LDL || op == OP_LDBU || op == OP_LDWU || op == OP_LDQ_U) {
       if (ra == 31) continue;            // LDx R31 is a NOP (interpreter skips the read)
       const int disp = (int) (int16_t) (ins & 0xFFFF);
-      const int size_bits = (op == OP_LDQ) ? 64 : (op == OP_LDL) ? 32 : (op == OP_LDWU) ? 16 : 8;
+      const int size_bits = (op == OP_LDQ || op == OP_LDQ_U) ? 64 : (op == OP_LDL) ? 32 : (op == OP_LDWU) ? 16 : 8;
       const int amask = (size_bits / 8) - 1;
       if (rb == 31)  a.mov(x86::rdx, imm(disp));         // va -> RDX
       else        {  a.mov(x86::rdx, reg(rb)); if (disp) a.add(x86::rdx, imm(disp)); }
+      if (op == OP_LDQ_U) a.and_(x86::rdx, imm(~(uint64_t) 7));   // LDQ_U: force 8-byte alignment
 
       // Slow path: jit_read(cpu, va, size, &out); on fault bail to `done` returning i
       // (0..i-1 committed). In JIT_VERIFY builds this is the ONLY path, so the helper's
@@ -432,7 +436,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
         a.add(x86::eax, x86::r14d);                       // + earlier chained iterations
         a.jmp(done);
         a.bind(ok);
-        if      (op == OP_LDQ)  a.mov(x86::rax, x86::qword_ptr(x86::rsp, 32));
+        if (op == OP_LDQ || op == OP_LDQ_U) a.mov(x86::rax, x86::qword_ptr(x86::rsp, 32));  // LDQ/LDQ_U: full quad
         else if (op == OP_LDL)  a.movsxd(x86::rax, x86::dword_ptr(x86::rsp, 32));
         else if (op == OP_LDWU) a.movzx(x86::eax, x86::word_ptr(x86::rsp, 32));   // BWX: zero-extend
         else                    a.movzx(x86::eax, x86::byte_ptr(x86::rsp, 32));   // LDBU
@@ -466,7 +470,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       a.or_(x86::rax, x86::r10);                                        // rax = phys
       a.cmp(x86::rax, x86::qword_ptr(x86::rsi, m_off.dram_size));       a.jae(slow);
       a.mov(x86::r10, x86::qword_ptr(x86::rsi, m_off.dram_ptr));
-      if      (op == OP_LDQ)  a.mov(x86::rax, x86::qword_ptr(x86::r10, x86::rax));
+      if (op == OP_LDQ || op == OP_LDQ_U) a.mov(x86::rax, x86::qword_ptr(x86::r10, x86::rax));  // LDQ/LDQ_U: full quad
       else if (op == OP_LDL)  a.movsxd(x86::rax, x86::dword_ptr(x86::r10, x86::rax));
       else if (op == OP_LDWU) a.movzx(x86::eax, x86::word_ptr(x86::r10, x86::rax));   // BWX: zero-extend
       else                    a.movzx(x86::eax, x86::byte_ptr(x86::r10, x86::rax));   // LDBU
@@ -483,11 +487,12 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     // value): in verify it compares against the interpreter's recorded store (stores touch
     // memory, not GPRs), in production it writes (side-effect-free cache translation, bail
     // on miss). On a fault, bail like a load. (Inline write fast path is a follow-up.)
-    if (op == OP_STL || op == OP_STQ || op == OP_STB || op == OP_STW) {
+    if (op == OP_STL || op == OP_STQ || op == OP_STB || op == OP_STW || op == OP_STQ_U) {
       const int disp = (int) (int16_t) (ins & 0xFFFF);
-      const int size_bits = (op == OP_STQ) ? 64 : (op == OP_STL) ? 32 : (op == OP_STW) ? 16 : 8;
+      const int size_bits = (op == OP_STQ || op == OP_STQ_U) ? 64 : (op == OP_STL) ? 32 : (op == OP_STW) ? 16 : 8;
       if (rb == 31)  a.mov(x86::rdx, imm(disp));                       // va -> RDX
       else        {  a.mov(x86::rdx, reg(rb)); if (disp) a.add(x86::rdx, imm(disp)); }
+      if (op == OP_STQ_U) a.and_(x86::rdx, imm(~(uint64_t) 7));        // STQ_U: force 8-byte alignment
       if (ra == 31)  a.xor_(x86::r9d, x86::r9d);                       // value -> R9 (R31 == 0)
       else           a.mov(x86::r9, reg(ra));
       a.mov(x86::rcx, x86::rsi);                                       // cpu
