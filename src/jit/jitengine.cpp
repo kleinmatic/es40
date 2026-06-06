@@ -13,6 +13,8 @@ enum SafeOp {
   OP_NONE,
   OP_ADDQ, OP_SUBQ, OP_ADDL, OP_SUBL,
   OP_S4ADDQ, OP_S8ADDQ, OP_S4SUBQ, OP_S8SUBQ,
+  OP_S4ADDL, OP_S8ADDL, OP_S4SUBL, OP_S8SUBL,   // INTA (0x10) scaled longword: sext32((Ra*scale) +/- Rb)
+  OP_CMPBGE,                                    // INTA (0x10) per-byte unsigned compare -> 8-bit mask
   OP_AND, OP_BIS, OP_XOR, OP_BIC, OP_ORNOT, OP_EQV,
   OP_CMOV,                       // INTL (0x11) conditional moves CMOVxx: Rc = cond(Ra) ? op2 : Rc
   OP_CMPEQ, OP_CMPLT, OP_CMPLE, OP_CMPULT, OP_CMPULE,
@@ -57,9 +59,13 @@ SafeOp classify(uint32_t ins, bool pal_block)
         case 0x00: return OP_ADDL;   case 0x09: return OP_SUBL;
         case 0x22: return OP_S4ADDQ; case 0x32: return OP_S8ADDQ;
         case 0x2b: return OP_S4SUBQ; case 0x3b: return OP_S8SUBQ;
+        case 0x02: return OP_S4ADDL; case 0x12: return OP_S8ADDL;
+        case 0x0b: return OP_S4SUBL; case 0x1b: return OP_S8SUBL;
+        case 0x0f: return OP_CMPBGE;
         case 0x2d: return OP_CMPEQ;  case 0x4d: return OP_CMPLT;
         case 0x6d: return OP_CMPLE;  case 0x1d: return OP_CMPULT;
         case 0x3d: return OP_CMPULE;
+        // ADDL/V (0x40), SUBL/V (0x49), ADDQ/V (0x60), SUBQ/V (0x69): overflow-trapping -> interpret
       }
       break;
     case 0x11: // INTL
@@ -325,8 +331,9 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       // compilable subset is already settled, so it points at the next NEW target rather than a
       // decided one: 0x00 CALL_PAL (terminator), 0x1b HW_LD / 0x1f HW_ST (physical done;
       // conditional/virtual forms side-effecting), 0x1d HW_MTPR (pure-store IPRs done; rest
-      // side-effecting). JMP (0x1a) + HW_RET (0x1e) are now compiled+chained. Stats count all.
-      if (!m_first_breaker_logged && bop != 0x00 && bop != 0x1b && bop != 0x1d && bop != 0x1f) {
+      // side-effecting), 0x10 INTA (scaled-L + CMPBGE done; only /V overflow-trap variants left).
+      // JMP (0x1a) + HW_RET (0x1e) are now compiled+chained. Stats count all.
+      if (!m_first_breaker_logged && bop != 0x00 && bop != 0x1b && bop != 0x1d && bop != 0x1f && bop != 0x10) {
         m_first_breaker_logged = true;
         printf("[JIT][PUNCH] first unhandled breaker: %s(0x%02x) ins=%08x at pc=%016llx%s\n",
                opcode_name(bop), bop, words[plen],
@@ -857,15 +864,32 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       case OP_CMPULT: op1_rax(); op2_rcx(); a.cmp(x86::rax, x86::rcx); a.setb(x86::al);  a.movzx(x86::eax, x86::al); break;
       case OP_CMPULE: op1_rax(); op2_rcx(); a.cmp(x86::rax, x86::rcx); a.setbe(x86::al); a.movzx(x86::eax, x86::al); break;
 
-      case OP_ADDL: case OP_SUBL:  // 32-bit, result sign-extended to 64
+      case OP_CMPBGE:   // 8 parallel unsigned byte compares (Ra.byte[i] >= op2.byte[i]) -> bit i; bits 63:8 = 0
+        op1_rax(); op2_rcx();
+        a.movq(x86::xmm0, x86::rax);             // Ra (8 bytes)
+        a.movq(x86::xmm1, x86::rcx);             // op2 (8 bytes; literal in byte 0, 0 elsewhere)
+        a.movdqa(x86::xmm2, x86::xmm0);          // copy of Ra
+        a.pmaxub(x86::xmm2, x86::xmm1);          // per-byte unsigned max(Ra, op2)
+        a.pcmpeqb(x86::xmm2, x86::xmm0);         // 0xff where max == Ra, i.e. Ra >= op2
+        a.pmovmskb(x86::eax, x86::xmm2);         // gather byte-sign bits -> low 8 bits = the mask
+        a.movzx(x86::eax, x86::al);              // discard the high (zero-padded) lane bits
+        break;
+
+      case OP_ADDL: case OP_SUBL:                                    // 32-bit, result sign-extended to 64
+      case OP_S4ADDL: case OP_S8ADDL: case OP_S4SUBL: case OP_S8SUBL: // scaled longword: sext32((Ra*scale) +/- Rb)
       {
+        const bool issub = (op == OP_SUBL || op == OP_S4SUBL || op == OP_S8SUBL);
+        const int  sh    = (op == OP_S4ADDL || op == OP_S4SUBL) ? 2     // Ra*4
+                         : (op == OP_S8ADDL || op == OP_S8SUBL) ? 3     // Ra*8
+                         : 0;
         if (ra == 31) a.xor_(x86::eax, x86::eax);
         else          a.mov(x86::eax, reg32(ra));   // shadow-remapped (was a raw rbx read)
+        if (sh) a.shl(x86::eax, imm(sh));            // scale in 32-bit: (Ra<<sh)[31:0] == ((RAV<<sh)+..)[31:0]
         if (islit)         a.mov(x86::ecx, imm(lit));
         else if (rb == 31) a.xor_(x86::ecx, x86::ecx);
         else               a.mov(x86::ecx, reg32(rb));
-        if (op == OP_ADDL) a.add(x86::eax, x86::ecx);
-        else               a.sub(x86::eax, x86::ecx);
+        if (issub) a.sub(x86::eax, x86::ecx);
+        else       a.add(x86::eax, x86::ecx);
         a.movsxd(x86::rax, x86::eax);
         break;
       }
