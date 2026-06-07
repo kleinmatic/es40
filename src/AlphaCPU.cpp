@@ -1413,7 +1413,30 @@ void* CAlphaCPU::jit_indirect(CAlphaCPU* cpu, u64 target)
 {
 	CJitEngine::JitBlock* b = cpu->m_jit->lookup(target, (u32) cpu->state.asn);
 	if (!b || !b->jit_body) return nullptr;
-	if ((target & 1) && !cpu->state.sde) return nullptr;   // PALmode target: shadow remap assumes SDE
+	if (target & 1)
+	{
+		// PALmode target: the I-stream is physically addressed (not paged), so no remap / no stale
+		// risk. A PALmode block's shadow-register remap assumes SDE -- honor the dispatcher's guard.
+		if (!cpu->state.sde) return nullptr;
+		return b->jit_body;
+	}
+	// Native target: the in-frame chain bypasses the dispatcher's `b->phys == start_phys` staleness
+	// check (see the hot-path guard ~line 789). Virtual+ASN keying can't see a page remap, so a stale
+	// block could tail-execute as wrong code -> OPCDEC / garbage. 
+	const int i = cpu->FindTBEntry(target, ACCESS_EXEC);
+	if (i < 0) return nullptr;                                  // ITB miss: let the dispatcher fault it in
+	const auto& e = cpu->state.tb[TB_INDEX_ITB][i];
+	const u64  tphys = e.phys | (target & e.keep_mask);
+	if (tphys != b->phys)
+	{
+		// Caught a stale block: the page was remapped without flushing the JIT cache. Bail so the
+		// dispatcher re-records/recompiles. Rate-limited log -- this firing confirms the stale chain.
+		static int n = 0;
+		if (n++ < 50)
+			printf("[JIT] INDIRECT STALE: target=%016llx block_phys=%016llx live_phys=%016llx -- recompiling\n",
+			       (unsigned long long) target, (unsigned long long) b->phys, (unsigned long long) tphys);
+		return nullptr;
+	}
 	return b->jit_body;
 }
 #endif
