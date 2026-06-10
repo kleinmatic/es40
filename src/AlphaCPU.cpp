@@ -783,6 +783,17 @@ void CAlphaCPU::jit_run(int budget)
 		// Hot path: virtual+ASN lookup, validated against the live physical.
 		CJitEngine::JitBlock* b = m_jit->lookup(start_virt, start_asn);
 
+		// A valid block whose phys no longer matches = a page remap the virtual key can't see.
+		// The cold path below re-records it; log it -- it's the smoking gun for stale-chain bugs.
+		if (b && b->code && b->phys != start_phys)
+		{
+			static int n_stale = 0;
+			if (n_stale++ < 20)
+				printf("[JIT] DISPATCH STALE: pc=%016llx block_phys=%016llx live_phys=%016llx\n",
+				       (unsigned long long) start_virt, (unsigned long long) b->phys,
+				       (unsigned long long) start_phys);
+		}
+
 		// Run the compiled safe prefix natively when available -- but not while an
 		// interrupt or delayed timer is pending. Compiled blocks don't run the
 		// per-instruction polls, so run the interpreter.
@@ -790,6 +801,7 @@ void CAlphaCPU::jit_run(int budget)
 			&& !state.check_int && !state.check_timers
 			&& (!(b->tag & 1) || state.sde))   // PALmode block: its shadow-register remap assumes SDE
 		{
+			b->gen = m_jit->itb_gen();   // phys just validated: refresh so chains keep the fast path
 #ifdef JIT_VERIFY
 			// Interpret the prefix (authoritative), recording each loaded value so the
 			// compiled pass can replay it instead of re-reading memory. Skip the compare
@@ -810,7 +822,9 @@ void CAlphaCPU::jit_run(int budget)
 				const int lra = (ins >> 21) & 0x1F;
 				// HW_LD physical (0x1b, func 0/1) is a load too: the compiled form replays through
 				// this same vlog, but its address is physical (untranslated) with a 12-bit disp.
-				const bool is_hwld = (opc == 0x1b) && (((ins >> 12) & 0xf) <= 1);
+				// Func 5 (quad VPTE) too -- its logged va is virtual, jit_read_vpte's replay key.
+				const bool is_hwld = (opc == 0x1b) &&
+				                     ((((ins >> 12) & 0xf) <= 1) || (((ins >> 12) & 0xf) == 5));
 				// RPCC/RC/RS (MISC 0x18) and ISUM (HW_MFPR 0x19 fn 0x0d) read CPU state the verify can't
 				// re-derive; the compiled forms pull their value from this same load log (jit_misc /
 				// jit_hw_mfpr replay it), so log them like loads.
@@ -912,12 +926,17 @@ void CAlphaCPU::jit_run(int budget)
 				auto cap_iprs = [&](u64* d) {
 					d[0] = state.last_tb_virt; d[1] = last_dtb_virt[0]; d[2] = last_dtb_virt[1];
 					d[3] = state.pctr_ctl; d[4] = state.dc_ctl; d[5] = (u64) state.cc_offset; d[6] = (u64) (u32) state.alt_cm;
+					// IER enables; check_int not snapshotted (rolling it back could suppress a poll)
+					d[7] = (u64) (u32) state.asten; d[8] = (u64) (u32) state.sien; d[9] = (u64) (u32) state.pcen;
+					d[10] = (u64) (u32) state.cren; d[11] = (u64) (u32) state.slen; d[12] = (u64) (u32) state.eien;
 				};
 				auto put_iprs = [&](const u64* s) {
 					state.last_tb_virt = s[0]; last_dtb_virt[0] = s[1]; last_dtb_virt[1] = s[2];
 					state.pctr_ctl = s[3]; state.dc_ctl = s[4]; state.cc_offset = (u32) s[5]; state.alt_cm = (int) s[6];
+					state.asten = (int) s[7]; state.sien = (int) s[8]; state.pcen = (int) s[9];
+					state.cren = (int) s[10]; state.slen = (int) s[11]; state.eien = (int) s[12];
 				};
-				u64 ipr_interp[7];
+				u64 ipr_interp[13];
 				cap_iprs(ipr_interp);
 				u64 jr[64];   // 64: a compiled PALmode block may touch the shadow bank
 				memcpy(jr, snap, sizeof(jr));
@@ -948,9 +967,9 @@ void CAlphaCPU::jit_run(int budget)
 						       (unsigned long long) state.r[2], (unsigned long long) jr[2],
 						       (unsigned long long) snap[5]);
 					}
-					u64 ipr_jit[7];
+					u64 ipr_jit[13];
 					cap_iprs(ipr_jit);   // compiled pass wrote IPRs into live state; check vs interp
-					for (int ii = 0; ii < 7; ii++) if (ipr_jit[ii] != ipr_interp[ii])
+					for (int ii = 0; ii < 13; ii++) if (ipr_jit[ii] != ipr_interp[ii])
 						printf("[JIT][VERIFY] IPR MISMATCH at %016llx slot %d: interp=%016llx jit=%016llx\n",
 						       (unsigned long long) start_virt, ii,
 						       (unsigned long long) ipr_interp[ii], (unsigned long long) ipr_jit[ii]);
@@ -1011,7 +1030,7 @@ void CAlphaCPU::jit_run(int budget)
 				                     (void*) &CAlphaCPU::jit_read_phys, (void*) &CAlphaCPU::jit_hw_mtpr,
 				                     (void*) &CAlphaCPU::jit_write_phys, (void*) &CAlphaCPU::jit_indirect,
 				                     (void*) &CAlphaCPU::jit_read_locked, (void*) &CAlphaCPU::jit_stc,
-				                     (void*) &CAlphaCPU::jit_misc);
+				                     (void*) &CAlphaCPU::jit_misc, (void*) &CAlphaCPU::jit_read_vpte);
 		}
 	}
 }
@@ -1158,6 +1177,41 @@ int CAlphaCPU::jit_read_locked(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 	// Establish the LL exclusive monitor (DO_LDx_L's READ_VIRT_LOCK_F makes the same cpu_lock call):
 	// per-CPU address/value + an atomic flag bit. The matching STx_C value-compares against it.
 	cpu->cSystem->cpu_lock(cpu->state.iProcNum, phys, *out);
+	return 0;
+}
+
+// JIT HW_LD VPTE helper (static). HW_LD func 5 (the DTBMISS PTE fetch): a virtual read access-
+// checked vs KERNEL, not cm (DO_HW_LDQ case 5). Side-effect-free TB probe; bails on miss so the
+// interpreter vectors the double miss. Skips the data_page_cache (keyed by current cm).
+int CAlphaCPU::jit_read_vpte(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
+{
+	const u64 amask = (u64) (size_bits / 8) - 1;
+	if (va & amask) return 1;                 // unaligned: let the interpreter handle it
+
+	const int i = cpu->FindTBEntry(va, ACCESS_READ);
+	if (i < 0) return 1;                                                  // TB miss (double miss)
+	const auto& e = cpu->state.tb[TB_INDEX_DATA][i];
+	if (!e.access[0][0]) return 1;            // protection: kernel read access
+	if (e.fault[0]) return 1;                 // fault-on-read (FOR)
+	const u64 phys = e.phys | (va & e.keep_mask);
+
+	if (phys >= cpu->dram_size)               // MMIO: bail before the replay (mirrors jit_read)
+		return 1;
+
+	if (cpu->m_jit_vreplay)
+	{
+		if (va != cpu->m_jit_vaddr[cpu->m_jit_vlog_i])
+		{
+			static int n = 0;
+			if (n++ < 50)
+				printf("[JIT] VPTE ADDR MISMATCH: compiled va=%016llx interp va=%016llx\n",
+				       (unsigned long long) va, (unsigned long long) cpu->m_jit_vaddr[cpu->m_jit_vlog_i]);
+		}
+		*out = cpu->m_jit_vlog[cpu->m_jit_vlog_i++];
+		return 0;
+	}
+
+	*out = dram_read(cpu->dram_ptr, phys, size_bits);
 	return 0;
 }
 
@@ -1395,19 +1449,32 @@ u64 CAlphaCPU::jit_hw_mfpr(CAlphaCPU* cpu, u32 ins, u64 cur)
 	return cur;   // unknown IPR: DO_HW_MFPR's UNKNOWN2 leaves Ra unchanged
 }
 
-/* HW_MTPR (PALmode): store the side-effect-free IPR selected by `function` (value = Rb). The verify
- * pass isolates+checks these live-state writes. Mirrors DO_HW_MTPR (cpu_pal.h) verbatim; classify
- * never compiles the side-effecting IPRs, so only these functions can reach here. */
+/* HW_MTPR (PALmode): the IPR write selected by `function` (value = Rb). Mirrors DO_HW_MTPR
+ * (cpu_pal.h) verbatim. Pure stores are verify-compared via the IPR snapshot; the TB fills
+ * forward to add_tb_i/_d (idempotent, so the verify double-run is safe); IER's check_int=true
+ * kick can only force an interrupt poll, never suppress one. */
 void CAlphaCPU::jit_hw_mtpr(CAlphaCPU* cpu, u32 function, u64 value)
 {
 	switch (function)
 	{
 	case 0x00: cpu->state.last_tb_virt = value; break;                          // ITB_TAG
+	case 0x01: cpu->add_tb_i(cpu->state.last_tb_virt, value); break;            // ITB_PTE (ITB fill)
+	case 0x0a:                                                                   // IER
+		cpu->state.asten = (int) (value >> 13) & 1;
+		cpu->state.sien  = (int) (value >> 13) & 0xfffe;
+		cpu->state.pcen  = (int) (value >> 29) & 3;
+		cpu->state.cren  = (int) (value >> 31) & 1;
+		cpu->state.slen  = (int) (value >> 32) & 1;
+		cpu->state.eien  = (int) (value >> 33) & 0x3f;
+		cpu->state.check_int = true;                       // newly enabled pending ints must be polled
+		break;
 	case 0x14: cpu->state.pctr_ctl = value & U64(0xffffffffffffffdf); break;     // PCTR_CTL
 	case 0x20: cpu->last_dtb_virt[0] = value; break;                             // DTB_TAG0
+	case 0x21: cpu->add_tb_d(cpu->last_dtb_virt[0], value, 0); break;            // DTB_PTE0 (DTB fill)
 	case 0x26: cpu->state.alt_cm = (int) (value & 3); break;                     // DTB_ALTMODE
 	case 0x29: cpu->state.dc_ctl = value; break;                                 // DC_CTL
 	case 0xa0: cpu->last_dtb_virt[1] = value; break;                             // DTB_TAG1
+	case 0xa1: cpu->add_tb_d(cpu->last_dtb_virt[1], value, 1); break;            // DTB_PTE1 (DTB fill)
 	case 0xc0: cpu->state.cc_offset = (u32) (value >> 32); break;                // CC
 	}
 }

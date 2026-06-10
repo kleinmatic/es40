@@ -35,6 +35,7 @@ enum SafeOp {
   OP_LDA, OP_LDAH,               // load-address: Ra = Rb + disp16 (<<16 for LDAH); pure ALU
   OP_HW_MFPR,                    // HW_MFPR (0x19), PALmode only: Ra = IPR[(ins>>8)&0xff] via helper
   OP_HW_LDL, OP_HW_LDQ,          // HW_LD (0x1b) physical func 0/1, PALmode only: Ra = phys[Rb+disp12]
+  OP_HW_LDQ_VPTE,                // HW_LD (0x1b) func 5: virtual PTE fetch, access-checked vs KERNEL mode
   OP_HW_MTPR,                    // HW_MTPR (0x1d) side-effect-free IPRs, PALmode only: IPR[fn] = Rb
   OP_HW_STL, OP_HW_STQ,          // HW_ST (0x1f) physical func 0/1, PALmode only: phys[Rb+disp12] = Ra
   OP_JMP,                        // JMP/JSR/RET (0x1a): Ra = PC+4; PC = Rb & ~3 (computed target)
@@ -136,23 +137,28 @@ SafeOp classify(uint32_t ins, bool pal_block)
       // devices raise from other threads)
       if (!pal_block) return OP_NONE;
       return OP_HW_MFPR;
-    case 0x1b: {                // HW_LD: read phys[Rb+disp12] -> Ra. PALmode-only. Compile only the
-      // physical longword/quadword forms (func 0/1, no translation). Locked (LL/SC), VPTE, virtual,
-      // alt-mode and write-check forms all run DATA_PHYS_NT translation with side effects -> interpret.
+    case 0x1b: {                // HW_LD: read phys[Rb+disp12] -> Ra. PALmode-only. Compile the
+      // physical forms (func 0/1) and the quad VPTE fetch (func 5, kernel-checked -- see
+      // jit_read_vpte). Locked, virtual, alt and write-check forms stay interpreted.
       if (!pal_block) return OP_NONE;
       const uint32_t f = (ins >> 12) & 0xf;
       if (f == 0) return OP_HW_LDL;
       if (f == 1) return OP_HW_LDQ;
+      if (f == 5) {             // Ra==31: nothing to log/replay -> interpret
+        if (((ins >> 21) & 0x1f) == 31) return OP_NONE;
+        return OP_HW_LDQ_VPTE;
+      }
       return OP_NONE;
     }
-    case 0x1d: {                // HW_MTPR (PALmode): compile only the side-effect-free IPR writes.
-      // TB-fill tags, DC_CTL, DTB_ALTMODE, PCTR_CTL, CC offset are plain stores; the no-op IPRs
-      // write nothing. Everything else (TB/cache flush, interrupts, PAL_BASE, i_ctl, the 0x40-7f
-      // group) has side effects -> interpret. The verify pass snapshots+compares these IPR writes.
+    case 0x1d: {                // HW_MTPR (PALmode): compile the pure-store IPRs, the TB fills
+      // (idempotent forwards to add_tb_i/_d) and IER (field stores + check_int kick). TB/cache
+      // flushes, CM writes, SIRR/HW_INT_CLR, PAL_BASE, i_ctl, the 0x40-7f group stay interpreted.
       if (!pal_block) return OP_NONE;
       switch ((ins >> 8) & 0xff) {
         case 0x00: case 0x14: case 0x20: case 0x26:   // ITB_TAG, PCTR_CTL, DTB_TAG0, DTB_ALTMODE
         case 0x29: case 0xa0: case 0xc0:              // DC_CTL, DTB_TAG1, CC
+        case 0x01: case 0x21: case 0xa1:              // ITB_PTE, DTB_PTE0, DTB_PTE1 (TB fills)
+        case 0x0a:                                    // IER (interrupt enables + check_int kick)
           return OP_HW_MTPR;
         case 0x15: case 0x17: case 0x27:              // CLR_MAP, SLEEP, MM_STAT (no-ops)
         case 0x2b: case 0x2c: case 0x2d:              // C_DATA, C_SHIFT, M_FIX (no-ops)
@@ -325,7 +331,7 @@ static const bool g_zapnot_init = [] {
   return true;
 }();
 
-void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper, void* hw_ld_helper, void* hw_mtpr_helper, void* hw_st_helper, void* indirect_helper, void* read_locked_helper, void* stc_helper, void* misc_helper)
+void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper, void* hw_ld_helper, void* hw_mtpr_helper, void* hw_st_helper, void* indirect_helper, void* read_locked_helper, void* stc_helper, void* misc_helper, void* read_vpte_helper)
 {
   using namespace asmjit;
   b->compiled = true;
@@ -577,17 +583,18 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     // HW_LD physical (PALmode func 0/1): Ra = phys[Rb + disp12], no translation. jit_read_phys
     // does the aligned DRAM read (or replays in verify, bails on MMIO so the interpreter does the
     // ordered device read). disp is 12-bit here, not the 16-bit memory-format displacement.
-    if (op == OP_HW_LDL || op == OP_HW_LDQ) {
+    if (op == OP_HW_LDL || op == OP_HW_LDQ || op == OP_HW_LDQ_VPTE) {
       if (ra == 31) continue;                                  // R31 dest discards the read
       const int disp = (int) ((int32_t) (ins << 20) >> 20);    // sign-extend 12-bit displacement
-      const int size_bits = (op == OP_HW_LDQ) ? 64 : 32;
-      if (rb == 31)  a.mov(x86::rdx, imm(disp));               // phys addr -> RDX
+      const int size_bits = (op == OP_HW_LDL) ? 32 : 64;
+      if (rb == 31)  a.mov(x86::rdx, imm(disp));               // address (phys, or virtual for VPTE) -> RDX
       else        {  a.mov(x86::rdx, reg(rb)); if (disp) a.add(x86::rdx, imm(disp)); }
       a.mov(x86::rcx, x86::rsi);                               // cpu
       a.mov(x86::r8d, imm(size_bits));                         // size in bits
       a.lea(x86::r9, x86::qword_ptr(x86::rsp, 32));            // &out slot
-      a.mov(x86::rax, imm((uint64_t) hw_ld_helper));
-      a.call(x86::rax);                                        // jit_read_phys(cpu, phys, size, &out)
+      // func 5 -> jit_read_vpte (kernel-checked virtual read); else jit_read_phys
+      a.mov(x86::rax, imm((uint64_t) (op == OP_HW_LDQ_VPTE ? read_vpte_helper : hw_ld_helper)));
+      a.call(x86::rax);
       Label ok = a.new_label();
       a.test(x86::eax, x86::eax);
       a.jz(ok);
@@ -596,8 +603,8 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       a.add(x86::eax, x86::r14d);                               // + earlier chained iterations
       a.jmp(done);
       a.bind(ok);
-      if (op == OP_HW_LDQ) a.mov(x86::rax, x86::qword_ptr(x86::rsp, 32));
-      else                 a.movsxd(x86::rax, x86::dword_ptr(x86::rsp, 32));
+      if (op == OP_HW_LDL) a.movsxd(x86::rax, x86::dword_ptr(x86::rsp, 32));
+      else                 a.mov(x86::rax, x86::qword_ptr(x86::rsp, 32));   // HW_LDQ / VPTE: full quad
       a.mov(reg(ra), x86::rax);
       continue;
     }
@@ -980,11 +987,12 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   // [succ + off]. 
   const uint32_t off_body = (uint32_t) ((char*) &b->jit_body - (char*) b);
   const uint32_t off_tag  = (uint32_t) ((char*) &b->tag      - (char*) b);
+  const uint32_t off_gen  = (uint32_t) ((char*) &b->gen      - (char*) b);
   // Cached direct link: tail straight into our cached successor's body if it's still live
   // -- compiled (jit_body != 0, cleared on flush/recompile) AND still maps this exit's PC
-  // (tag == R10). Otherwise record a patch request (m_link_from = this block) so the
-  // dispatcher fills b->link the next time it runs the successor, and fall back to it.
-  // R10 = next PC; clobbers RAX/RCX/RDX.
+  // (tag == R10) AND, for native targets, phys-validated under the current ITB generation
+  // (gen-stale -> dispatcher, which rechecks phys and re-stamps). Otherwise record a patch
+  // request (m_link_from = this block) and fall back. R10 = next PC; clobbers RAX/RCX/RDX.
   auto emit_chain = [&](Label& lbl) {
     Label miss = a.new_label();
     a.mov(x86::rax, imm((uint64_t) &b->link));
@@ -994,12 +1002,17 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     a.test(x86::rcx, x86::rcx);                            a.jz(miss);
     a.mov(x86::rdx, x86::qword_ptr(x86::rax, off_tag));        // succ->tag
     a.cmp(x86::rdx, x86::r10);                             a.jne(miss);   // not this exit's target
-    // The dispatcher runs a compiled PALmode block only when SDE is set (its shadow remap
-    // assumes it); the cached link must honor the same guard. Don't tail into a PALmode
-    // successor (tag bit 0) with SDE clear , bail to the interpreter
+    // PALmode successor (tag bit 0): physically addressed, no staleness risk, but its shadow
+    // remap assumes SDE -- honor the dispatcher's guard. Native successor: require gen-fresh.
+    Label pal_chk  = a.new_label();
     Label chain_ok = a.new_label();
-    a.test(x86::r10, imm(1));                             a.jz(chain_ok);   // non-PAL target: chain
-    a.cmp(x86::byte_ptr(x86::rsi, m_off.sde), imm(0));    a.je(miss);       // PALmode + !SDE: don't
+    a.test(x86::r10, imm(1));                             a.jnz(pal_chk);
+    a.mov(x86::rdx, imm((uint64_t) &m_itb_gen));
+    a.mov(x86::rdx, x86::qword_ptr(x86::rdx));                 // current ITB generation
+    a.cmp(x86::qword_ptr(x86::rax, off_gen), x86::rdx);   a.jne(miss);   // stale: revalidate via dispatcher
+    a.jmp(chain_ok);
+    a.bind(pal_chk);
+    a.cmp(x86::byte_ptr(x86::rsi, m_off.sde), imm(0));    a.je(miss);    // PALmode + !SDE: don't
     a.bind(chain_ok);
     a.jmp(x86::rcx);                                           // HIT: tail in (shared frame)
     a.bind(miss);
