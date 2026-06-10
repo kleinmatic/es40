@@ -929,7 +929,8 @@ void CAlphaCPU::jit_run(int budget)
 					// IER enables; check_int not snapshotted (rolling it back could suppress a poll)
 					d[7] = (u64) (u32) state.asten; d[8] = (u64) (u32) state.sien; d[9] = (u64) (u32) state.pcen;
 					d[10] = (u64) (u32) state.cren; d[11] = (u64) (u32) state.slen; d[12] = (u64) (u32) state.eien;
-					d[13] = state.exc_sum;   // FPSTART clears it (compiled ITOFx/FTOIx)
+					d[13] = state.exc_sum;   // FPSTART clears it (compiled ITOFx/FTOIx/FLTL)
+					d[14] = state.fpcr;      // MT_FPCR (compiled FLTL) writes it
 				};
 				auto put_iprs = [&](const u64* s) {
 					state.last_tb_virt = s[0]; last_dtb_virt[0] = s[1]; last_dtb_virt[1] = s[2];
@@ -937,8 +938,9 @@ void CAlphaCPU::jit_run(int budget)
 					state.asten = (int) s[7]; state.sien = (int) s[8]; state.pcen = (int) s[9];
 					state.cren = (int) s[10]; state.slen = (int) s[11]; state.eien = (int) s[12];
 					state.exc_sum = s[13];
+					state.fpcr = s[14];
 				};
-				u64 ipr_interp[14];
+				u64 ipr_interp[15];
 				cap_iprs(ipr_interp);
 				// FP file: compiled ITOFx writes state.f live (like the IPR writes); snapshot the
 				// interp pass's result, compare after the compiled pass, then restore.
@@ -973,9 +975,9 @@ void CAlphaCPU::jit_run(int budget)
 						       (unsigned long long) state.r[2], (unsigned long long) jr[2],
 						       (unsigned long long) snap[5]);
 					}
-					u64 ipr_jit[14];
+					u64 ipr_jit[15];
 					cap_iprs(ipr_jit);   // compiled pass wrote IPRs into live state; check vs interp
-					for (int ii = 0; ii < 14; ii++) if (ipr_jit[ii] != ipr_interp[ii])
+					for (int ii = 0; ii < 15; ii++) if (ipr_jit[ii] != ipr_interp[ii])
 						printf("[JIT][VERIFY] IPR MISMATCH at %016llx slot %d: interp=%016llx jit=%016llx\n",
 						       (unsigned long long) start_virt, ii,
 						       (unsigned long long) ipr_interp[ii], (unsigned long long) ipr_jit[ii]);
@@ -1042,7 +1044,8 @@ void CAlphaCPU::jit_run(int budget)
 				                     (void*) &CAlphaCPU::jit_write_phys, (void*) &CAlphaCPU::jit_indirect,
 				                     (void*) &CAlphaCPU::jit_read_locked, (void*) &CAlphaCPU::jit_stc,
 				                     (void*) &CAlphaCPU::jit_misc, (void*) &CAlphaCPU::jit_read_vpte,
-				                     (void*) &CAlphaCPU::jit_itof, (void*) &CAlphaCPU::jit_ftoi);
+				                     (void*) &CAlphaCPU::jit_itof, (void*) &CAlphaCPU::jit_ftoi,
+				                     (void*) &CAlphaCPU::jit_fltl);
 		}
 	}
 }
@@ -1155,6 +1158,40 @@ int CAlphaCPU::jit_ftoi(CAlphaCPU* cpu, u32 fa, u32 fmt, u64* out)
 	if (cpu->state.fpen == 0) return 1;       // FEN trap: the interpreter vectors it
 	cpu->state.exc_sum = 0;                   // FPSTART
 	*out = (fmt == 1) ? sext_u64_32(cpu->ieee_sts(cpu->state.f[fa])) : cpu->state.f[fa];
+	return 0;
+}
+
+// JIT FLTL non-arithmetic helper (static). FPCR moves, sign-copies, FP conditional moves and the
+// CVTLQ/CVTQL bit rearrangements -- mirrored verbatim from cpu_fp_operate.h; classify only routes
+// these funcs here (no FP math, no /V trap forms). Returns 1 = FEN-trap bail.
+int CAlphaCPU::jit_fltl(CAlphaCPU* cpu, u32 ins)
+{
+	if (cpu->state.fpen == 0) return 1;       // FEN trap: the interpreter vectors it
+	cpu->state.exc_sum = 0;                   // FPSTART
+	u64* f = cpu->state.f;
+	const u32 fa = (ins >> 21) & 0x1f, fb = (ins >> 16) & 0x1f, fc = ins & 0x1f;
+	switch ((ins >> 5) & 0x7ff)
+	{
+	case 0x010:                                                                  // CVTLQ
+		f[fc] = sext_u64_32(((f[fb] >> 32) & 0xC0000000) | ((f[fb] >> 29) & 0x3FFFFFFF));
+		break;
+	case 0x020: f[fc] = (f[fa] & FPR_SIGN) | (f[fb] & ~FPR_SIGN); break;          // CPYS
+	case 0x021: f[fc] = ((f[fa] & FPR_SIGN) ^ FPR_SIGN) | (f[fb] & ~FPR_SIGN); break;   // CPYSN
+	case 0x022:                                                                  // CPYSE
+		f[fc] = (f[fa] & (FPR_SIGN | FPR_EXP)) | (f[fb] & ~(FPR_SIGN | FPR_EXP));
+		break;
+	case 0x024: cpu->write_fpcr_arch(f[fa]); break;                               // MT_FPCR
+	case 0x025: f[fa] = cpu->read_fpcr_arch(); break;                             // MF_FPCR (dest = Fa)
+	case 0x02a: if ((f[fa] & ~FPR_SIGN) == 0) f[fc] = f[fb]; break;               // FCMOVEQ
+	case 0x02b: if ((f[fa] & ~FPR_SIGN) != 0) f[fc] = f[fb]; break;               // FCMOVNE
+	case 0x02c: if ((f[fa] & FPR_SIGN) && (f[fa] & ~FPR_SIGN) != 0) f[fc] = f[fb]; break;   // FCMOVLT
+	case 0x02d: if (!(f[fa] & FPR_SIGN) || (f[fa] & ~FPR_SIGN) == 0) f[fc] = f[fb]; break;  // FCMOVGE
+	case 0x02e: if ((f[fa] & FPR_SIGN) || (f[fa] & ~FPR_SIGN) == 0) f[fc] = f[fb]; break;   // FCMOVLE
+	case 0x02f: if (!(f[fa] & FPR_SIGN) && (f[fa] & ~FPR_SIGN) != 0) f[fc] = f[fb]; break;  // FCMOVGT
+	case 0x030:                                                                  // CVTQL (no /V form)
+		f[fc] = ((f[fb] & U64(0xC0000000)) << 32) | ((f[fb] & U64(0x3FFFFFFF)) << 29);
+		break;
+	}
 	return 0;
 }
 

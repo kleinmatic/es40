@@ -18,6 +18,7 @@ enum SafeOp {
   OP_SEXTB, OP_SEXTW,                            // FPTI (0x1c) CIX/BWX: Rc = sign-extend byte/word of op2
   OP_ITOFS, OP_ITOFF, OP_ITOFT,                  // ITFP (0x14) int->FP reg moves: f[Fc] = fmt(Ra)
   OP_FTOIS, OP_FTOIT,                            // FPTI (0x1c) FP->int reg moves: Rc = fmt(f[Fa])
+  OP_FLTL,                                       // FLTL (0x17) non-arithmetic: FPCR moves, CPYSx, FCMOVx, CVTLQ/QL
   OP_AND, OP_BIS, OP_XOR, OP_BIC, OP_ORNOT, OP_EQV,
   OP_CMOV,                       // INTL (0x11) conditional moves CMOVxx: Rc = cond(Ra) ? op2 : Rc
   OP_AMASK, OP_IMPLVER,          // INTL (0x11) CPU feature probes: Rc = op2 & ~CPU_AMASK / Rc = CPU_IMPLVER
@@ -116,6 +117,17 @@ SafeOp classify(uint32_t ins, bool pal_block)
       if (f14 == 0x014) return OP_ITOFF;
       if (f14 == 0x024) return OP_ITOFT;
       return OP_NONE;
+    }
+    case 0x17: {  // FLTL: all non-arithmetic (FPCR moves, sign-copies, FCMOVs, CVTLQ/QL) via
+      // jit_fltl; only the /V trap variants of CVTQL stay interpreted.
+      const uint32_t f17 = (ins >> 5) & 0x7ff;
+      const bool ok = f17 == 0x010 || (f17 >= 0x020 && f17 <= 0x022) || f17 == 0x024
+                   || f17 == 0x025 || (f17 >= 0x02a && f17 <= 0x02f) || f17 == 0x030;
+      if (!ok) return OP_NONE;
+      // f31-dest gate (interp zeroes f[31] per instr): MF_FPCR writes f[Fa]; MT_FPCR has no FP dest
+      if (f17 == 0x025)      { if (((ins >> 21) & 0x1f) == 31) return OP_NONE; }
+      else if (f17 != 0x024) { if ((ins & 0x1f) == 31) return OP_NONE; }
+      return OP_FLTL;
     }
     case 0x1c: // FPTI (CIX/BWX/MVI/FP-moves): the pure-ALU sign-extends and the FP->int register
       // moves compile here. CTPOP/CTLZ/CTTZ (bit-count: zero-handling + popcnt/lzcnt CPU feature)
@@ -347,7 +359,7 @@ static const bool g_zapnot_init = [] {
   return true;
 }();
 
-void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper, void* hw_ld_helper, void* hw_mtpr_helper, void* hw_st_helper, void* indirect_helper, void* read_locked_helper, void* stc_helper, void* misc_helper, void* read_vpte_helper, void* itof_helper, void* ftoi_helper)
+void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper, void* hw_ld_helper, void* hw_mtpr_helper, void* hw_st_helper, void* indirect_helper, void* read_locked_helper, void* stc_helper, void* misc_helper, void* read_vpte_helper, void* itof_helper, void* ftoi_helper, void* fltl_helper)
 {
   using namespace asmjit;
   b->compiled = true;
@@ -386,9 +398,10 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       // conditional/virtual forms side-effecting), 0x1d HW_MTPR (pure-store IPRs done; rest
       // side-effecting), 0x10 INTA + 0x13 INTM (non-trapping ops done; only /V overflow-trap variants left),
       // 0x18 MISC (barriers/hints + RPCC/RC/RS via log/replay done; only the rare Ra==31 RC/RS forms interpret),
-      // 0x14 ITFP (ITOF* moves done; SQRT* = the deferred FP-math class: FPCR/rounding/traps).
+      // 0x14 ITFP (ITOF* moves done; SQRT* = the deferred FP-math class: FPCR/rounding/traps),
+      // 0x17 FLTL (non-arithmetic done; only CVTQL/V trap variants left).
       // JMP (0x1a) + HW_RET (0x1e) are now compiled+chained. Stats count all.
-      if (!m_first_breaker_logged && bop != 0x00 && bop != 0x1b && bop != 0x1d && bop != 0x1f && bop != 0x10 && bop != 0x18 && bop != 0x13 && bop != 0x14) {
+      if (!m_first_breaker_logged && bop != 0x00 && bop != 0x1b && bop != 0x1d && bop != 0x1f && bop != 0x10 && bop != 0x18 && bop != 0x13 && bop != 0x14 && bop != 0x17) {
         m_first_breaker_logged = true;
         printf("[JIT][PUNCH] first unhandled breaker: %s(0x%02x) ins=%08x at pc=%016llx%s\n",
                opcode_name(bop), bop, words[plen],
@@ -770,6 +783,23 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       a.bind(ok);
       a.mov(x86::rax, x86::qword_ptr(x86::rsp, 32));
       a.mov(reg(rc), x86::rax);                        // Rc (reg() applies the PALshadow remap)
+      continue;
+    }
+
+    // FLTL non-arithmetic (0x17): all effects in state.f / fpcr via jit_fltl(cpu, ins).
+    if (op == OP_FLTL) {
+      a.mov(x86::rcx, x86::rsi);                       // cpu
+      a.mov(x86::edx, imm(ins));                       // full instruction (helper decodes func/regs)
+      a.mov(x86::rax, imm((uint64_t) fltl_helper));
+      a.call(x86::rax);                                // jit_fltl(cpu, ins)
+      Label ok = a.new_label();
+      a.test(x86::eax, x86::eax);
+      a.jz(ok);
+      set_pc(b->tag + 4 * (uint64_t) i);               // FEN trap: resume here in the interpreter
+      a.mov(x86::eax, imm(i));
+      a.add(x86::eax, x86::r14d);
+      a.jmp(done);
+      a.bind(ok);
       continue;
     }
 

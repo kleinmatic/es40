@@ -519,6 +519,8 @@ private:
   // Int<->FP register moves (ITOFx / FTOIx). fmt: 0=T raw, 1=S, 2=F. Return 1 = FEN-trap bail.
   static int jit_itof(CAlphaCPU* cpu, u32 fc, u64 value, u32 fmt);
   static int jit_ftoi(CAlphaCPU* cpu, u32 fa, u32 fmt, u64* out);
+  // FLTL (0x17) non-arithmetic: FPCR moves, CPYSx, FCMOVx, CVTLQ/QL. Return 1 = FEN-trap bail.
+  static int jit_fltl(CAlphaCPU* cpu, u32 ins);
   // Verify support: the interpreter pass records each value it loads, and the
   // compiled pass replays them instead of re-reading memory - false mismatch fix
   bool m_jit_vreplay = false;  // compiled pass: replay recorded loads, don't re-read
