@@ -929,15 +929,21 @@ void CAlphaCPU::jit_run(int budget)
 					// IER enables; check_int not snapshotted (rolling it back could suppress a poll)
 					d[7] = (u64) (u32) state.asten; d[8] = (u64) (u32) state.sien; d[9] = (u64) (u32) state.pcen;
 					d[10] = (u64) (u32) state.cren; d[11] = (u64) (u32) state.slen; d[12] = (u64) (u32) state.eien;
+					d[13] = state.exc_sum;   // FPSTART clears it (compiled ITOFx/FTOIx)
 				};
 				auto put_iprs = [&](const u64* s) {
 					state.last_tb_virt = s[0]; last_dtb_virt[0] = s[1]; last_dtb_virt[1] = s[2];
 					state.pctr_ctl = s[3]; state.dc_ctl = s[4]; state.cc_offset = (u32) s[5]; state.alt_cm = (int) s[6];
 					state.asten = (int) s[7]; state.sien = (int) s[8]; state.pcen = (int) s[9];
 					state.cren = (int) s[10]; state.slen = (int) s[11]; state.eien = (int) s[12];
+					state.exc_sum = s[13];
 				};
-				u64 ipr_interp[13];
+				u64 ipr_interp[14];
 				cap_iprs(ipr_interp);
+				// FP file: compiled ITOFx writes state.f live (like the IPR writes); snapshot the
+				// interp pass's result, compare after the compiled pass, then restore.
+				u64 f_interp[64];
+				memcpy(f_interp, state.f, sizeof(f_interp));
 				u64 jr[64];   // 64: a compiled PALmode block may touch the shadow bank
 				memcpy(jr, snap, sizeof(jr));
 				const u64 interp_pc = state.pc;   // interpreter is authoritative for the PC
@@ -967,16 +973,21 @@ void CAlphaCPU::jit_run(int budget)
 						       (unsigned long long) state.r[2], (unsigned long long) jr[2],
 						       (unsigned long long) snap[5]);
 					}
-					u64 ipr_jit[13];
+					u64 ipr_jit[14];
 					cap_iprs(ipr_jit);   // compiled pass wrote IPRs into live state; check vs interp
-					for (int ii = 0; ii < 13; ii++) if (ipr_jit[ii] != ipr_interp[ii])
+					for (int ii = 0; ii < 14; ii++) if (ipr_jit[ii] != ipr_interp[ii])
 						printf("[JIT][VERIFY] IPR MISMATCH at %016llx slot %d: interp=%016llx jit=%016llx\n",
 						       (unsigned long long) start_virt, ii,
 						       (unsigned long long) ipr_interp[ii], (unsigned long long) ipr_jit[ii]);
+					for (int fi = 0; fi < 64; fi++) if (state.f[fi] != f_interp[fi])
+						printf("[JIT][VERIFY] FP MISMATCH at %016llx f%d: interp=%016llx jit=%016llx\n",
+						       (unsigned long long) start_virt, fi,
+						       (unsigned long long) f_interp[fi], (unsigned long long) state.f[fi]);
 					m_jit->verify_compare(start_virt, state.r, jr, vw, b->prefix_len);
 				}
 				state.pc = interp_pc;   // restore; the block's PC write was only for the check
 				put_iprs(ipr_interp);   // roll back the compiled pass's live IPR writes (verify-only)
+				memcpy(state.f, f_interp, sizeof(f_interp));   // ...and its FP writes
 			}
 			continue;
 #else
@@ -1030,7 +1041,8 @@ void CAlphaCPU::jit_run(int budget)
 				                     (void*) &CAlphaCPU::jit_read_phys, (void*) &CAlphaCPU::jit_hw_mtpr,
 				                     (void*) &CAlphaCPU::jit_write_phys, (void*) &CAlphaCPU::jit_indirect,
 				                     (void*) &CAlphaCPU::jit_read_locked, (void*) &CAlphaCPU::jit_stc,
-				                     (void*) &CAlphaCPU::jit_misc, (void*) &CAlphaCPU::jit_read_vpte);
+				                     (void*) &CAlphaCPU::jit_misc, (void*) &CAlphaCPU::jit_read_vpte,
+				                     (void*) &CAlphaCPU::jit_itof, (void*) &CAlphaCPU::jit_ftoi);
 		}
 	}
 }
@@ -1123,6 +1135,27 @@ u64 CAlphaCPU::jit_misc(CAlphaCPU* cpu, u32 sel)
 		return v;
 	}
 	}
+}
+
+// JIT int->FP move helper (static). ITOFx: f[fc] = fmt(value). Mirrors DO_ITOFx incl. FPSTART
+// (fpen==0 -> return 1, the FEN-trap bail; exc_sum cleared). fmt: 0=T raw, 1=S, 2=F.
+int CAlphaCPU::jit_itof(CAlphaCPU* cpu, u32 fc, u64 value, u32 fmt)
+{
+	if (cpu->state.fpen == 0) return 1;       // FEN trap: the interpreter vectors it
+	cpu->state.exc_sum = 0;                   // FPSTART
+	if (fmt == 1)      cpu->state.f[fc] = cpu->ieee_lds((u32) value);
+	else if (fmt == 2) cpu->state.f[fc] = cpu->vax_ldf(SWAP_VAXF((u32) value));
+	else               cpu->state.f[fc] = value;
+	return 0;
+}
+
+// JIT FP->int move helper (static). FTOIx: *out = fmt(f[fa]). Same FPSTART bail. fmt: 0=T, 1=S.
+int CAlphaCPU::jit_ftoi(CAlphaCPU* cpu, u32 fa, u32 fmt, u64* out)
+{
+	if (cpu->state.fpen == 0) return 1;       // FEN trap: the interpreter vectors it
+	cpu->state.exc_sum = 0;                   // FPSTART
+	*out = (fmt == 1) ? sext_u64_32(cpu->ieee_sts(cpu->state.f[fa])) : cpu->state.f[fa];
+	return 0;
 }
 
 // JIT load-locked helper (static). LDx_L: the verify-checked load PLUS cpu_lock -- the LL/SC

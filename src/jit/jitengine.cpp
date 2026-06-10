@@ -16,6 +16,8 @@ enum SafeOp {
   OP_S4ADDL, OP_S8ADDL, OP_S4SUBL, OP_S8SUBL,   // INTA (0x10) scaled longword: sext32((Ra*scale) +/- Rb)
   OP_CMPBGE,                                    // INTA (0x10) per-byte unsigned compare -> 8-bit mask
   OP_SEXTB, OP_SEXTW,                            // FPTI (0x1c) CIX/BWX: Rc = sign-extend byte/word of op2
+  OP_ITOFS, OP_ITOFF, OP_ITOFT,                  // ITFP (0x14) int->FP reg moves: f[Fc] = fmt(Ra)
+  OP_FTOIS, OP_FTOIT,                            // FPTI (0x1c) FP->int reg moves: Rc = fmt(f[Fa])
   OP_AND, OP_BIS, OP_XOR, OP_BIC, OP_ORNOT, OP_EQV,
   OP_CMOV,                       // INTL (0x11) conditional moves CMOVxx: Rc = cond(Ra) ? op2 : Rc
   OP_AMASK, OP_IMPLVER,          // INTL (0x11) CPU feature probes: Rc = op2 & ~CPU_AMASK / Rc = CPU_IMPLVER
@@ -105,11 +107,25 @@ SafeOp classify(uint32_t ins, bool pal_block)
       if (func == 0x00) return OP_MULL;    // 32-bit multiply, low 32 sign-extended
       if (func == 0x30) return OP_UMULH;   // high 64 bits of the unsigned 128-bit product
       break;
-    case 0x1c: // FPTI (CIX/BWX/MVI/FP-moves): only the pure-ALU sign-extends compile here. CTPOP/
-      // CTLZ/CTTZ (bit-count: zero-handling + popcnt/lzcnt CPU feature), MVI packed media (PERR/
-      // MIN/MAX/PK/UNPK), and FTOIS/FTOIT (read the FP register file) stay interpreted for now.
+    case 0x14: {  // ITFP: compile the int->FP register moves; SQRT* (FP math: FPCR/rounding/traps)
+      // stays interpreted. Rb must be 31 (else the interp traps OPCDEC); Fc==31 is interpreted
+      // (the interp zeroes f[31] per instruction -- a compiled write would desync).
+      const uint32_t f14 = (ins >> 5) & 0x7ff;
+      if (((ins >> 16) & 0x1f) != 31 || (ins & 0x1f) == 31) return OP_NONE;
+      if (f14 == 0x004) return OP_ITOFS;
+      if (f14 == 0x014) return OP_ITOFF;
+      if (f14 == 0x024) return OP_ITOFT;
+      return OP_NONE;
+    }
+    case 0x1c: // FPTI (CIX/BWX/MVI/FP-moves): the pure-ALU sign-extends and the FP->int register
+      // moves compile here. CTPOP/CTLZ/CTTZ (bit-count: zero-handling + popcnt/lzcnt CPU feature)
+      // and MVI packed media (PERR/MIN/MAX/PK/UNPK) stay interpreted for now.
       if (func == 0x00) return OP_SEXTB;   // sign-extend byte of op2
       if (func == 0x01) return OP_SEXTW;   // sign-extend word of op2
+      if (func == 0x70 || func == 0x78) {  // FTOIT / FTOIS: Rb must be 31; Rc==31 -> interpret
+        if (((ins >> 16) & 0x1f) != 31 || (ins & 0x1f) == 31) return OP_NONE;
+        return (func == 0x70) ? OP_FTOIT : OP_FTOIS;
+      }
       break;
     case 0x18: // MISC: memory barriers -> mfence (keep MP ordering); prefetch/cache hints -> no-op
       switch (ins & 0xFFFF) {
@@ -331,7 +347,7 @@ static const bool g_zapnot_init = [] {
   return true;
 }();
 
-void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper, void* hw_ld_helper, void* hw_mtpr_helper, void* hw_st_helper, void* indirect_helper, void* read_locked_helper, void* stc_helper, void* misc_helper, void* read_vpte_helper)
+void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper, void* hw_ld_helper, void* hw_mtpr_helper, void* hw_st_helper, void* indirect_helper, void* read_locked_helper, void* stc_helper, void* misc_helper, void* read_vpte_helper, void* itof_helper, void* ftoi_helper)
 {
   using namespace asmjit;
   b->compiled = true;
@@ -369,9 +385,10 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       // decided one: 0x00 CALL_PAL (terminator), 0x1b HW_LD / 0x1f HW_ST (physical done;
       // conditional/virtual forms side-effecting), 0x1d HW_MTPR (pure-store IPRs done; rest
       // side-effecting), 0x10 INTA + 0x13 INTM (non-trapping ops done; only /V overflow-trap variants left),
-      // 0x18 MISC (barriers/hints + RPCC/RC/RS via log/replay done; only the rare Ra==31 RC/RS forms interpret).
+      // 0x18 MISC (barriers/hints + RPCC/RC/RS via log/replay done; only the rare Ra==31 RC/RS forms interpret),
+      // 0x14 ITFP (ITOF* moves done; SQRT* = the deferred FP-math class: FPCR/rounding/traps).
       // JMP (0x1a) + HW_RET (0x1e) are now compiled+chained. Stats count all.
-      if (!m_first_breaker_logged && bop != 0x00 && bop != 0x1b && bop != 0x1d && bop != 0x1f && bop != 0x10 && bop != 0x18 && bop != 0x13) {
+      if (!m_first_breaker_logged && bop != 0x00 && bop != 0x1b && bop != 0x1d && bop != 0x1f && bop != 0x10 && bop != 0x18 && bop != 0x13 && bop != 0x14) {
         m_first_breaker_logged = true;
         printf("[JIT][PUNCH] first unhandled breaker: %s(0x%02x) ins=%08x at pc=%016llx%s\n",
                opcode_name(bop), bop, words[plen],
@@ -711,6 +728,48 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       a.mov(x86::rax, imm((uint64_t) misc_helper));
       a.call(x86::rax);                                // -> RAX = value (replayed in verify)
       a.mov(reg(ra), x86::rax);                        // Ra = value (reg() applies the PALshadow remap)
+      continue;
+    }
+
+    // ITOFx (0x14): f[Fc] = fmt(Ra). jit_itof mirrors FPSTART (fpen -> FEN trap = bail, exc_sum=0);
+    // the verify compares the FP file via its snapshot.
+    if (op == OP_ITOFS || op == OP_ITOFF || op == OP_ITOFT) {
+      a.mov(x86::rcx, x86::rsi);                       // cpu
+      a.mov(x86::edx, imm(rc));                        // Fc (plain index, FREG has no shadow remap)
+      if (ra == 31)  a.xor_(x86::r8d, x86::r8d);       // value (R31 == 0)
+      else           a.mov(x86::r8, reg(ra));
+      a.mov(x86::r9d, imm(op == OP_ITOFS ? 1 : (op == OP_ITOFF) ? 2 : 0));   // fmt: S/F/T
+      a.mov(x86::rax, imm((uint64_t) itof_helper));
+      a.call(x86::rax);                                // jit_itof(cpu, fc, value, fmt)
+      Label ok = a.new_label();
+      a.test(x86::eax, x86::eax);
+      a.jz(ok);
+      set_pc(b->tag + 4 * (uint64_t) i);               // FEN trap: resume here in the interpreter
+      a.mov(x86::eax, imm(i));
+      a.add(x86::eax, x86::r14d);
+      a.jmp(done);
+      a.bind(ok);
+      continue;
+    }
+
+    // FTOIx (0x1c): Rc = fmt(f[Fa]). Same FPSTART bail shape; dest is a GPR (verify-compared).
+    if (op == OP_FTOIS || op == OP_FTOIT) {
+      a.mov(x86::rcx, x86::rsi);                       // cpu
+      a.mov(x86::edx, imm(ra));                        // Fa (the Ra field, plain index)
+      a.mov(x86::r8d, imm(op == OP_FTOIS ? 1 : 0));    // fmt: S/T
+      a.lea(x86::r9, x86::qword_ptr(x86::rsp, 32));    // &out
+      a.mov(x86::rax, imm((uint64_t) ftoi_helper));
+      a.call(x86::rax);                                // jit_ftoi(cpu, fa, fmt, &out)
+      Label ok = a.new_label();
+      a.test(x86::eax, x86::eax);
+      a.jz(ok);
+      set_pc(b->tag + 4 * (uint64_t) i);               // FEN trap: resume here in the interpreter
+      a.mov(x86::eax, imm(i));
+      a.add(x86::eax, x86::r14d);
+      a.jmp(done);
+      a.bind(ok);
+      a.mov(x86::rax, x86::qword_ptr(x86::rsp, 32));
+      a.mov(reg(rc), x86::rax);                        // Rc (reg() applies the PALshadow remap)
       continue;
     }
 

@@ -516,6 +516,9 @@ private:
   // MISC (0x18) state reads: sel 0=RPCC (cycle counter), 1=RC, 2=RS (read interrupt flag +
   // clear/set). Value the verify can't re-derive -> replayed from the load log like a load.
   static u64 jit_misc(CAlphaCPU* cpu, u32 sel);
+  // Int<->FP register moves (ITOFx / FTOIx). fmt: 0=T raw, 1=S, 2=F. Return 1 = FEN-trap bail.
+  static int jit_itof(CAlphaCPU* cpu, u32 fc, u64 value, u32 fmt);
+  static int jit_ftoi(CAlphaCPU* cpu, u32 fa, u32 fmt, u64* out);
   // Verify support: the interpreter pass records each value it loads, and the
   // compiled pass replays them instead of re-reading memory - false mismatch fix
   bool m_jit_vreplay = false;  // compiled pass: replay recorded loads, don't re-read
