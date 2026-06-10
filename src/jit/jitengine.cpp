@@ -18,6 +18,7 @@ enum SafeOp {
   OP_SEXTB, OP_SEXTW,                            // FPTI (0x1c) CIX/BWX: Rc = sign-extend byte/word of op2
   OP_AND, OP_BIS, OP_XOR, OP_BIC, OP_ORNOT, OP_EQV,
   OP_CMOV,                       // INTL (0x11) conditional moves CMOVxx: Rc = cond(Ra) ? op2 : Rc
+  OP_AMASK, OP_IMPLVER,          // INTL (0x11) CPU feature probes: Rc = op2 & ~CPU_AMASK / Rc = CPU_IMPLVER
   OP_CMPEQ, OP_CMPLT, OP_CMPLE, OP_CMPULT, OP_CMPULE,
   OP_SLL, OP_SRL, OP_SRA, OP_MULQ,
   OP_MULL, OP_UMULH,             // INTM (0x13): MULL = sext32(Ra*op2); UMULH = hi64 of unsigned Ra*op2
@@ -79,6 +80,11 @@ SafeOp classify(uint32_t ins, bool pal_block)
         case 0x14: case 0x16: case 0x24: case 0x26:   // CMOVLBS/LBC/EQ/NE
         case 0x44: case 0x46: case 0x64: case 0x66:   // CMOVLT/GE/LE/GT
           return OP_CMOV;
+        case 0x61:                                    // AMASK: Ra must be R31 (else the interp's
+          // DO_AMASK traps OPCDEC) -- compile only the architecturally valid form.
+          if (((ins >> 21) & 0x1f) != 31) return OP_NONE;
+          return OP_AMASK;
+        case 0x6c: return OP_IMPLVER;                 // IMPLVER: Rc = implementation version constant
       }
       break;
     case 0x12: // INTS: shifts + byte-manipulation (extract / insert / mask / zap), Rb&7 keyed
@@ -215,6 +221,8 @@ CJitEngine::CJitEngine() : m_recorded(0), m_code_bytes(0), m_rt(nullptr)
   m_stat_compiled = m_stat_plen_sum = 0;
   memset(m_term_op, 0, sizeof(m_term_op));
   memset(m_pal_func, 0, sizeof(m_pal_func));
+  memset(m_mtpr_func, 0, sizeof(m_mtpr_func));
+  memset(m_hwld_func, 0, sizeof(m_hwld_func));
   m_first_breaker_logged = false;
 #endif
 }
@@ -346,6 +354,10 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       m_term_op[bop]++;                 // tally what cut this block (the coverage gap to chase)
       if (bop == 0x00)                  // CALL_PAL: also tally the function code (low 8 bits)
         m_pal_func[words[plen] & 0xFF]++;
+      else if (bop == 0x1d)             // HW_MTPR: tally the IPR index -- which writes break blocks
+        m_mtpr_func[(words[plen] >> 8) & 0xFF]++;
+      else if (bop == 0x1b)             // HW_LD: tally the form (phys/virt/lock/vpte/chk, ins[15:12])
+        m_hwld_func[(words[plen] >> 12) & 0xF]++;
       // Punch list: one-shot print of the first ACTIONABLE breaker -- skip the opcodes whose
       // compilable subset is already settled, so it points at the next NEW target rather than a
       // decided one: 0x00 CALL_PAL (terminator), 0x1b HW_LD / 0x1f HW_ST (physical done;
@@ -906,6 +918,15 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       case OP_SEXTB: op2_rcx(); a.movsx(x86::rax, x86::cl); break;   // Rc = sign-extend low byte of op2 (V_2)
       case OP_SEXTW: op2_rcx(); a.movsx(x86::rax, x86::cx); break;   // Rc = sign-extend low word of op2 (V_2)
 
+      case OP_AMASK:    // Rc = op2 & ~CPU_AMASK -- EV68 feature mask 0x1307 (keep in sync w/ cpu_defs.h);
+        op2_rcx();      // classify enforced Ra==31 (the Ra!=31 form traps OPCDEC in the interpreter)
+        a.mov(x86::rax, imm(~(uint64_t) 0x1307));
+        a.and_(x86::rax, x86::rcx);
+        break;
+      case OP_IMPLVER:  // Rc = CPU_IMPLVER (2 = EV6 family; keep in sync w/ cpu_defs.h)
+        a.mov(x86::eax, imm(2));
+        break;
+
       case OP_CMPEQ:  op1_rax(); op2_rcx(); a.cmp(x86::rax, x86::rcx); a.sete(x86::al);  a.movzx(x86::eax, x86::al); break;
       case OP_CMPLT:  op1_rax(); op2_rcx(); a.cmp(x86::rax, x86::rcx); a.setl(x86::al);  a.movzx(x86::eax, x86::al); break;
       case OP_CMPLE:  op1_rax(); op2_rcx(); a.cmp(x86::rax, x86::rcx); a.setle(x86::al); a.movzx(x86::eax, x86::al); break;
@@ -1132,6 +1153,32 @@ void CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr)
       if (best < 0) break;
       printf(" 0x%02x=%llu", best, (unsigned long long) bestv);
       ph[best] = 0;
+    }
+    printf("\n");
+  }
+  if (m_term_op[0x1d]) {   // HW_MTPR cut blocks -- which IPR writes dominate (the side-effecting set)
+    printf("[JIT][STATS]   HW_MTPR by IPR:");
+    uint64_t mh[256];
+    memcpy(mh, m_mtpr_func, sizeof(mh));
+    for (int rank = 0; rank < 8; ++rank) {
+      int best = -1; uint64_t bestv = 0;
+      for (int f = 0; f < 256; ++f) if (mh[f] > bestv) { bestv = mh[f]; best = f; }
+      if (best < 0) break;
+      printf(" 0x%02x=%llu", best, (unsigned long long) bestv);
+      mh[best] = 0;
+    }
+    printf("\n");
+  }
+  if (m_term_op[0x1b]) {   // HW_LD cut blocks -- which forms dominate (virt/lock/vpte/chk)
+    printf("[JIT][STATS]   HW_LD by form:");
+    uint64_t lh[16];
+    memcpy(lh, m_hwld_func, sizeof(lh));
+    for (int rank = 0; rank < 8; ++rank) {
+      int best = -1; uint64_t bestv = 0;
+      for (int f = 0; f < 16; ++f) if (lh[f] > bestv) { bestv = lh[f]; best = f; }
+      if (best < 0) break;
+      printf(" 0x%x=%llu", best, (unsigned long long) bestv);
+      lh[best] = 0;
     }
     printf("\n");
   }

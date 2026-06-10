@@ -115,6 +115,8 @@ private:
   uint64_t m_stat_compiled, m_stat_plen_sum;    // cumulative: compiled blocks, sum of their lengths
   uint64_t m_term_op[64];                       // cumulative: opcode that ended a block's compiled prefix
   uint64_t m_pal_func[256];                     // cumulative: CALL_PAL function code that ended a block
+  uint64_t m_mtpr_func[256];                    // cumulative: HW_MTPR (0x1d) IPR index that ended a block
+  uint64_t m_hwld_func[16];                     // cumulative: HW_LD (0x1b) form (ins>>12 & 0xf) that ended a block
   bool     m_first_breaker_logged;              // one-shot guard for the punch-list print
 #endif
 };
