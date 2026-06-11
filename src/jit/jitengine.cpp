@@ -243,7 +243,7 @@ SafeOp classify(uint32_t ins, bool pal_block)
 // Defined further down; forward-declared so compile_block's punch-list print can use it.
 static const char* opcode_name(unsigned op);
 
-CJitEngine::CJitEngine() : m_recorded(0), m_code_bytes(0), m_rt(nullptr)
+CJitEngine::CJitEngine(int cpu_id) : m_cpu_id(cpu_id), m_recorded(0), m_code_bytes(0), m_rt(nullptr)
 {
   memset(m_blocks, 0, sizeof(m_blocks));    // flush() is lazy (gen bump) -- zero the slots here
   m_rt = new asmjit::JitRuntime();
@@ -279,9 +279,9 @@ static inline uint64_t src_hash(const uint8_t* p, uint32_t n_instr)
 CJitEngine::JitBlock* CJitEngine::record(uint64_t virt_pc, uint64_t phys_pc, uint32_t asn, bool asm_global, uint32_t n_instr, const uint8_t* dram)
 {
   JitBlock& b = m_blocks[index_of(virt_pc)];
-  // record() is only reached after the dispatcher validated the live physical (phys_pc), so the
-  // block this returns is valid for the current ITB generation -- stamp it so chains skip re-checking.
-  b.gen = m_itb_gen;
+  // record() is only reached after the dispatcher validated the live physical, and every returning
+  // branch below verifies the code bytes (flush-fresh or hash), so stamp the chain epoch here.
+  b.vgen = m_itb_gen + m_flush_gen;
   // Still valid + matching + flush-fresh: nothing flushed us since last seen, so the code can't
   // have changed. (flush_gen-stale must NOT take this no-hash path -- post-IMB needs the hash.)
   if (b.valid && b.flush_gen == m_flush_gen && b.tag == virt_pc && (b.asm_global || b.asn == asn)
@@ -314,7 +314,7 @@ CJitEngine::JitBlock* CJitEngine::record(uint64_t virt_pc, uint64_t phys_pc, uin
   b.prefix_len = 0;
   b.compiled = false;
   if (++m_recorded == 50000)
-    printf("[JIT] block dispatcher active: 50000 blocks discovered.\n");
+    printf("[JIT][CPU%d] block dispatcher active: 50000 blocks discovered.\n", m_cpu_id);
   return &b;
 }
 
@@ -329,30 +329,36 @@ CJitEngine::JitBlock* CJitEngine::revalidate_flushed(uint64_t virt_pc, uint32_t 
   if (b.phys != phys_pc || b.src_sum != src_hash(dram + phys_pc, b.hash_len))
     return nullptr;
   b.flush_gen = m_flush_gen;
-  b.gen = m_itb_gen;   // phys just validated against the live translation
+  b.vgen = m_itb_gen + m_flush_gen;   // phys + code bytes just validated
   b.jit_body = (void*) ((uint8_t*) (void*) b.code + b.body_off);
   return &b;
 }
 
+// Free ALL compiled code (delete+new of the runtime; reset()-and-reuse corrupted the JitAllocator
+// block tree) and drop every slot's now-dangling pointers. Safe only from this CPU's cold path
+// (never while its compiled code could be executing); runtimes are per-CPU.
+void CJitEngine::reclaim_code()
+{
+  printf("[JIT][CPU%d] code reclaim: %llu MB freed\n", m_cpu_id,
+         (unsigned long long) (m_code_bytes >> 20));
+  delete (asmjit::JitRuntime*) m_rt;
+  m_rt = new asmjit::JitRuntime();
+  m_code_bytes = 0;
+  for (int i = 0; i < kCacheEntries; ++i) {
+    m_blocks[i].valid = false;
+    m_blocks[i].code = nullptr;
+    m_blocks[i].jit_body = nullptr;
+    m_blocks[i].compiled = false;
+  }
+}
+
 void CJitEngine::flush()
 {
-  // LAZY:  don't walk 16K slots each time. Bump the generation instead: stale blocks miss in 
+  // LAZY:  don't walk 16K slots each time. Bump the generation instead: stale blocks miss in
   // lookup() and revalidate_flushed() re-hashes their source bytes before they run again.
   ++m_flush_gen;
-  // Reclaim stays eager: freeing the runtime dangles every code pointer, so the slots must drop
-  // them. 
   if (m_rt && m_code_bytes >= kReclaimBytes)
-  {
-    delete (asmjit::JitRuntime*) m_rt;
-    m_rt = new asmjit::JitRuntime();
-    m_code_bytes = 0;
-    for (int i = 0; i < kCacheEntries; ++i) {
-      m_blocks[i].valid = false;
-      m_blocks[i].code = nullptr;
-      m_blocks[i].jit_body = nullptr;
-      m_blocks[i].compiled = false;
-    }
-  }
+    reclaim_code();
 }
 
 // ASM-bit-clear icache flush (process/ASN switch): drop only !asm_global blocks. Global (ASM) PAL
@@ -383,6 +389,13 @@ static const bool g_zapnot_init = [] {
 void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper, void* hw_ld_helper, void* hw_mtpr_helper, void* hw_st_helper, void* indirect_helper, void* read_locked_helper, void* stc_helper, void* misc_helper, void* read_vpte_helper, void* itof_helper, void* ftoi_helper, void* fltl_helper)
 {
   using namespace asmjit;
+  // Reclaim must self-trigger here, NOT only in flush(): flush() runs when the guest executes
+  // IMB/IC_FLUSH, and a compute-heavy phase can go minutes without one while recompiles keep
+  // allocating -- code memory grew unbounded (multi-GB). Safe: we're in this CPU's cold path.
+  if (m_rt && m_code_bytes >= kReclaimBytes) {
+    reclaim_code();
+    b->valid = true;   // b was just (re)validated by record(); restore it after the wipe
+  }
   b->compiled = true;
 
   uint64_t phys = b->phys;
@@ -424,8 +437,8 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       // JMP (0x1a) + HW_RET (0x1e) are now compiled+chained. Stats count all.
       if (!m_first_breaker_logged && bop != 0x00 && bop != 0x1b && bop != 0x1d && bop != 0x1f && bop != 0x10 && bop != 0x18 && bop != 0x13 && bop != 0x14 && bop != 0x17) {
         m_first_breaker_logged = true;
-        printf("[JIT][PUNCH] first unhandled breaker: %s(0x%02x) ins=%08x at pc=%016llx%s\n",
-               opcode_name(bop), bop, words[plen],
+        printf("[JIT][PUNCH][CPU%d] first unhandled breaker: %s(0x%02x) ins=%08x at pc=%016llx%s\n",
+               m_cpu_id, opcode_name(bop), bop, words[plen],
                (unsigned long long) ((b->tag & ~(uint64_t) 1) + (uint64_t) plen * 4),
                pal_block ? "  [PALmode]" : "");
       }
@@ -1097,8 +1110,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   // [succ + off]. 
   const uint32_t off_body = (uint32_t) ((char*) &b->jit_body  - (char*) b);
   const uint32_t off_tag  = (uint32_t) ((char*) &b->tag       - (char*) b);
-  const uint32_t off_gen  = (uint32_t) ((char*) &b->gen       - (char*) b);
-  const uint32_t off_fgen = (uint32_t) ((char*) &b->flush_gen - (char*) b);
+  const uint32_t off_vgen = (uint32_t) ((char*) &b->vgen      - (char*) b);
   // Cached direct link: tail straight into our cached successor's body if it's still live
   // -- compiled (jit_body != 0, cleared on flush/recompile) AND still maps this exit's PC
   // (tag == R10) AND, for native targets, phys-validated under the current ITB generation
@@ -1113,21 +1125,16 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     a.test(x86::rcx, x86::rcx);                            a.jz(miss);
     a.mov(x86::rdx, x86::qword_ptr(x86::rax, off_tag));        // succ->tag
     a.cmp(x86::rdx, x86::r10);                             a.jne(miss);   // not this exit's target
-    // ALL successors: code must postdate the last icache flush (IMB/IC_FLUSH is lazy -- stale
-    // blocks revalidate by source hash in the dispatcher before they may run again).
-    a.mov(x86::rdx, imm((uint64_t) &m_flush_gen));
-    a.mov(x86::rdx, x86::qword_ptr(x86::rdx));
-    a.cmp(x86::qword_ptr(x86::rax, off_fgen), x86::rdx);  a.jne(miss);
-    // PALmode successor (tag bit 0): physically addressed, no remap risk, but its shadow
-    // remap assumes SDE -- honor the dispatcher's guard. Native successor: require gen-fresh.
-    Label pal_chk  = a.new_label();
-    Label chain_ok = a.new_label();
-    a.test(x86::r10, imm(1));                             a.jnz(pal_chk);
+    // Single epoch guard, all successors: vgen = itb_gen + flush_gen at last validation; both
+    // counters are monotonic, so one sum compare catches a remap OR a flush since then.
+    const uint32_t fg_off = (uint32_t) ((char*) &m_flush_gen - (char*) &m_itb_gen);
     a.mov(x86::rdx, imm((uint64_t) &m_itb_gen));
-    a.mov(x86::rdx, x86::qword_ptr(x86::rdx));                 // current ITB generation
-    a.cmp(x86::qword_ptr(x86::rax, off_gen), x86::rdx);   a.jne(miss);   // stale: revalidate via dispatcher
-    a.jmp(chain_ok);
-    a.bind(pal_chk);
+    a.mov(x86::r11, x86::qword_ptr(x86::rdx));
+    a.add(x86::r11, x86::qword_ptr(x86::rdx, fg_off));         // current epoch sum
+    a.cmp(x86::qword_ptr(x86::rax, off_vgen), x86::r11);  a.jne(miss);   // stale: revalidate via dispatcher
+    // PALmode successor (tag bit 0): its shadow remap assumes SDE -- the dispatcher's guard.
+    Label chain_ok = a.new_label();
+    a.test(x86::r10, imm(1));                             a.jz(chain_ok);
     a.cmp(x86::byte_ptr(x86::rsi, m_off.sde), imm(0));    a.je(miss);    // PALmode + !SDE: don't
     a.bind(chain_ok);
     a.jmp(x86::rcx);                                           // HIT: tail in (shared frame)
@@ -1255,62 +1262,66 @@ void CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr)
   const uint64_t total = m_stat_native + m_stat_interp;
   if (total < 100000000) return;      // report every 100M instructions
 
+  // Build each line in a buffer and print it with ONE call: 4 CPU threads print concurrently,
+  // and per-item printf loops interleave mid-line. The [CPU%d] tag attributes each line.
   const double chain = m_stat_hot ? (double) m_stat_native / (double) m_stat_hot : 0.0;
   const double avgpl = m_stat_compiled ? (double) m_stat_plen_sum / (double) m_stat_compiled : 0.0;
-  printf("[JIT][STATS] native %.1f%% (%llu/%llu) | chain avg %.1f instr over %llu dispatches | interp %llu blks\n",
-         100.0 * (double) m_stat_native / (double) total,
+  char buf[512];
+  int  len;
+  printf("[JIT][STATS][CPU%d] native %.1f%% (%llu/%llu) | chain avg %.1f instr over %llu dispatches | interp %llu blks\n",
+         m_cpu_id, 100.0 * (double) m_stat_native / (double) total,
          (unsigned long long) m_stat_native, (unsigned long long) total,
          chain, (unsigned long long) m_stat_hot, (unsigned long long) m_stat_miss);
-  printf("[JIT][STATS] %llu recorded, %llu compiled (avg %.1f instr) | block-breakers:",
-         (unsigned long long) m_recorded, (unsigned long long) m_stat_compiled, avgpl);
+  len = snprintf(buf, sizeof(buf), "[JIT][STATS][CPU%d] %llu recorded, %llu compiled (avg %.1f instr) | block-breakers:",
+                 m_cpu_id, (unsigned long long) m_recorded, (unsigned long long) m_stat_compiled, avgpl);
   uint64_t hist[64];
   memcpy(hist, m_term_op, sizeof(hist));
-  for (int rank = 0; rank < 8; ++rank) {
+  for (int rank = 0; rank < 8 && len < (int) sizeof(buf) - 32; ++rank) {
     int best = -1; uint64_t bestv = 0;
     for (int op = 0; op < 64; ++op) if (hist[op] > bestv) { bestv = hist[op]; best = op; }
     if (best < 0) break;
-    printf(" %s(0x%02x)=%llu", opcode_name(best), best, (unsigned long long) bestv);
+    len += snprintf(buf + len, sizeof(buf) - len, " %s(0x%02x)=%llu", opcode_name(best), best, (unsigned long long) bestv);
     hist[best] = 0;
   }
-  printf("\n");
+  printf("%s\n", buf);
   if (m_term_op[0]) {   // CALL_PAL cut blocks -- show which function codes dominate (chain targets)
-    printf("[JIT][STATS]   CALL_PAL by func:");
+    len = snprintf(buf, sizeof(buf), "[JIT][STATS][CPU%d]   CALL_PAL by func:", m_cpu_id);
     uint64_t ph[256];
     memcpy(ph, m_pal_func, sizeof(ph));
-    for (int rank = 0; rank < 8; ++rank) {
+    for (int rank = 0; rank < 8 && len < (int) sizeof(buf) - 32; ++rank) {
       int best = -1; uint64_t bestv = 0;
       for (int f = 0; f < 256; ++f) if (ph[f] > bestv) { bestv = ph[f]; best = f; }
       if (best < 0) break;
-      printf(" 0x%02x=%llu", best, (unsigned long long) bestv);
+      len += snprintf(buf + len, sizeof(buf) - len, " 0x%02x=%llu", best, (unsigned long long) bestv);
       ph[best] = 0;
     }
-    printf("\n");
+    printf("%s\n", buf);
   }
   if (m_term_op[0x1d]) {   // HW_MTPR cut blocks -- which IPR writes dominate (the side-effecting set)
-    printf("[JIT][STATS]   HW_MTPR by IPR:");
+    len = snprintf(buf, sizeof(buf), "[JIT][STATS][CPU%d]   HW_MTPR by IPR:", m_cpu_id);
     uint64_t mh[256];
     memcpy(mh, m_mtpr_func, sizeof(mh));
-    for (int rank = 0; rank < 8; ++rank) {
+    for (int rank = 0; rank < 8 && len < (int) sizeof(buf) - 32; ++rank) {
       int best = -1; uint64_t bestv = 0;
       for (int f = 0; f < 256; ++f) if (mh[f] > bestv) { bestv = mh[f]; best = f; }
       if (best < 0) break;
-      printf(" 0x%02x=%llu", best, (unsigned long long) bestv);
+      len += snprintf(buf + len, sizeof(buf) - len, " 0x%02x=%llu", best, (unsigned long long) bestv);
       mh[best] = 0;
     }
-    printf("\n");
+    printf("%s\n", buf);
   }
   if (m_term_op[0x1b]) {   // HW_LD cut blocks -- which forms dominate (virt/lock/vpte/chk)
-    printf("[JIT][STATS]   HW_LD by form:");
+    len = snprintf(buf, sizeof(buf), "[JIT][STATS][CPU%d]   HW_LD by form:", m_cpu_id);
     uint64_t lh[16];
     memcpy(lh, m_hwld_func, sizeof(lh));
-    for (int rank = 0; rank < 8; ++rank) {
+    for (int rank = 0; rank < 8 && len < (int) sizeof(buf) - 32; ++rank) {
       int best = -1; uint64_t bestv = 0;
       for (int f = 0; f < 16; ++f) if (lh[f] > bestv) { bestv = lh[f]; best = f; }
       if (best < 0) break;
-      printf(" 0x%x=%llu", best, (unsigned long long) bestv);
+      len += snprintf(buf + len, sizeof(buf) - len, " 0x%x=%llu", best, (unsigned long long) bestv);
       lh[best] = 0;
     }
-    printf("\n");
+    printf("%s\n", buf);
   }
   m_stat_native = m_stat_interp = m_stat_hot = m_stat_miss = 0;   // reset the window
 }

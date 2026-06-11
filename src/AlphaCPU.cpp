@@ -439,7 +439,7 @@ void CAlphaCPU::init()
 	state.iProcNum = cSystem->RegisterCPU(this);
 
 #ifdef ES40_JIT
-	if (!m_jit) m_jit = new CJitEngine();
+	if (!m_jit) m_jit = new CJitEngine((int) state.iProcNum);
 	{
 		// Tell the JIT the byte offsets (from `this`) of the fields its inline load
 		// fast path reads, so compiled code can address them via [cpu + offset].
@@ -791,9 +791,9 @@ void CAlphaCPU::jit_run(int budget)
 		{
 			static int n_stale = 0;
 			if (n_stale++ < 20)
-				printf("[JIT] DISPATCH STALE: pc=%016llx block_phys=%016llx live_phys=%016llx\n",
-				       (unsigned long long) start_virt, (unsigned long long) b->phys,
-				       (unsigned long long) start_phys);
+				printf("[JIT][CPU%d] DISPATCH STALE: pc=%016llx block_phys=%016llx live_phys=%016llx\n",
+				       (int) state.iProcNum, (unsigned long long) start_virt,
+				       (unsigned long long) b->phys, (unsigned long long) start_phys);
 		}
 
 		// Run the compiled safe prefix natively when available -- but not while an
@@ -803,7 +803,7 @@ void CAlphaCPU::jit_run(int budget)
 			&& !state.check_int && !state.check_timers
 			&& (!(b->tag & 1) || state.sde))   // PALmode block: its shadow-register remap assumes SDE
 		{
-			b->gen = m_jit->itb_gen();   // phys just validated: refresh so chains keep the fast path
+			b->vgen = m_jit->vgen();   // phys validated + lookup proved flush-fresh: refresh the chain epoch
 #ifdef JIT_VERIFY
 			// Interpret the prefix (authoritative), recording each loaded value so the
 			// compiled pass can replay it instead of re-reading memory. Skip the compare
@@ -1567,11 +1567,10 @@ void* CAlphaCPU::jit_indirect(CAlphaCPU* cpu, u64 target)
 		if (!cpu->state.sde) return nullptr;
 		return b->jit_body;
 	}
-	// Native target. FAST PATH: if the block was validated under the current ITB generation, no
-	// I-stream TB invalidate has happened since, so its phys is still good -- chain with no
-	// re-translation.
-	const u64 gen = cpu->m_jit->itb_gen();
-	if (b->gen == gen)
+	// Native target. FAST PATH: validated under the current epoch (lookup proved flush-fresh, so a
+	// vgen mismatch here means an ITB invalidate) -- chain with no re-translation.
+	const u64 gen = cpu->m_jit->vgen();
+	if (b->vgen == gen)
 		return b->jit_body;
 	// SLOW PATH (only right after an ITB invalidate): the in-frame chain bypasses the dispatcher's
 	// `b->phys == start_phys` staleness check (see the hot-path). Virtual+ASN keying can't see a 
@@ -1586,11 +1585,11 @@ void* CAlphaCPU::jit_indirect(CAlphaCPU* cpu, u64 target)
 		// dispatcher re-records/recompiles. Rate-limited log -- this firing confirms the stale chain.
 		static int n = 0;
 		if (n++ < 50)
-			printf("[JIT] INDIRECT STALE: target=%016llx block_phys=%016llx -- recompiling\n",
-			       (unsigned long long) target, (unsigned long long) b->phys);
+			printf("[JIT][CPU%d] INDIRECT STALE: target=%016llx block_phys=%016llx -- recompiling\n",
+			       (int) cpu->state.iProcNum, (unsigned long long) target, (unsigned long long) b->phys);
 		return nullptr;
 	}
-	b->gen = gen;                                              // re-validated -> fast path henceforth
+	b->vgen = gen;                                             // re-validated -> fast path henceforth
 	return b->jit_body;
 }
 #endif

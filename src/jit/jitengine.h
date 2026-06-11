@@ -20,7 +20,9 @@ class CAlphaCPU;   // compiled blocks call back into the CPU for memory accesses
 class CJitEngine
 {
 public:
-  static constexpr int      kCacheBits = 14;
+  // 64K slots: the OS-active CPU's block working set (50K+) thrashed the old 16K direct-mapped
+  // cache -- conflict evictions caused ~190K recompiles per 100M instructions on that CPU.
+  static constexpr int      kCacheBits = 16;
   static constexpr int      kCacheEntries = 1 << kCacheBits;
   static constexpr uint64_t kIndexMask = (uint64_t) kCacheEntries - 1;
 
@@ -49,8 +51,9 @@ public:
     uint64_t src_sum;     // hash of the source words at compile time (revalidate vs self-mod)
     uint32_t hash_len;    // word count src_sum covers -- frozen at compile time; n_instr drifts
                           // (interrupt-truncated cold passes shrink it), so it must NOT key the hash
-    uint64_t gen;         // ITB generation at which phys was last validated (see jit_indirect): a
-                          // cheap gen==m_itb_gen compare skips the per-chain TB re-translation
+    uint64_t vgen;        // m_itb_gen + m_flush_gen at last full validation (phys + code bytes).
+                          // Both counters are monotonic, so one sum compare detects either changing
+                          // -- the single chain guard (see emit_chain / jit_indirect).
     uint64_t flush_gen;   // icache-flush generation at which the code bytes were last hash-validated;
                           // stale => lookup misses and revalidate_flushed() re-hashes (lazy IC_FLUSH)
   };
@@ -68,7 +71,7 @@ public:
   };
   void set_offsets(const JitOffsets& o) { m_off = o; }
 
-  CJitEngine();
+  explicit CJitEngine(int cpu_id = 0);   // cpu_id tags the stats/diagnostic prints
   ~CJitEngine();
 
   static inline uint64_t index_of(uint64_t virt_pc) { return (virt_pc >> 2) & kIndexMask; }
@@ -89,12 +92,13 @@ public:
   void compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper, void* hw_ld_helper, void* hw_mtpr_helper, void* hw_st_helper, void* indirect_helper, void* read_locked_helper, void* stc_helper, void* misc_helper, void* read_vpte_helper, void* itof_helper, void* ftoi_helper, void* fltl_helper);
   void flush();
   void flush_non_global();   // flush only !asm_global blocks (the ASM-bit-clear / ASN icache flush)
+  void reclaim_code();       // free ALL compiled code once past kReclaimBytes (cold-path only)
 
   // ITB-generation counter for the indirect-chain staleness check (jit_indirect). Bumped on every
   // I-stream TB invalidate (tbia/tbiap/tbis, ACCESS_EXEC) ... those can remap a code page WITHOUT
   // flushing the JIT, so a chained block could run stale bytes. 
   inline void     note_itb_invalidate() { ++m_itb_gen; }
-  inline uint64_t itb_gen() const       { return m_itb_gen; }
+  inline uint64_t vgen() const          { return m_itb_gen + m_flush_gen; }   // combined validation epoch
 
 #ifdef JIT_VERIFY
   // Differential check: compiled result (jit) vs interpreter result (interp), r[0..30].
@@ -109,6 +113,7 @@ public:
 
 private:
   JitBlock m_blocks[kCacheEntries];
+  int      m_cpu_id;
   uint64_t m_recorded;
   uint64_t m_itb_gen = 0; // current ITB generation (bumped on every I-stream TB invalidate)
   uint64_t m_flush_gen = 0; // current icache-flush generation (bumped by flush(); lazy IC_FLUSH/IMB)
