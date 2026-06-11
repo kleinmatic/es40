@@ -103,8 +103,19 @@ jobs:
           DRAFT: ${{ inputs.draft }}
         run: |
           set -euo pipefail
+          
+          if ! tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null)"; then
+            tag_sha=""
+          fi
+          if [ -z "$tag_sha" ]; then
+            echo "Creating tag $TAG at $HEAD_SHA"
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$HEAD_SHA" --silent
+          elif [ "$tag_sha" != "$HEAD_SHA" ]; then
+            echo "Tag $TAG already exists and points at $tag_sha, not the build commit $HEAD_SHA; refusing to release."
+            exit 1
+          fi
 
-          args=(--target "$HEAD_SHA" --title "$TAG" --notes-file notes.md)
+          args=(-R "$GITHUB_REPOSITORY" --title "$TAG" --notes-file notes.md)
           if [ "$DRAFT" = "true" ]; then
             args+=(--draft)
           fi
