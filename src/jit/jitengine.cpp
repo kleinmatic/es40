@@ -289,12 +289,14 @@ CJitEngine::JitBlock* CJitEngine::record(uint64_t virt_pc, uint64_t phys_pc, uin
     b.n_instr = n_instr;
     return &b;
   }
-  // Revalidate: a flush dropped the block but kept the compiled code. If the block is unchanged
-  // (tag+phys+asn+len + source hash) reuse it instead of recompiling. 
+  // Revalidate: a flush dropped the block but kept the compiled code. If the bytes the prefix was
+  // compiled from still hash the same, reuse it instead of recompiling. Hash over hash_len, NOT
+  // the caller's n_instr -- interrupt-truncated cold passes make n vary for the same block.
   if (b.code && b.tag == virt_pc && (b.asm_global || b.asn == asn) && b.phys == phys_pc
-      && b.n_instr == n_instr && b.src_sum == src_hash(dram + phys_pc, n_instr)) {
+      && b.src_sum == src_hash(dram + phys_pc, b.hash_len)) {
     b.valid = true;
     b.flush_gen = m_flush_gen;
+    b.n_instr = n_instr;
     b.jit_body = (void*) ((uint8_t*) (void*) b.code + b.body_off);   // restore chained re-entry
     return &b;
   }
@@ -324,7 +326,7 @@ CJitEngine::JitBlock* CJitEngine::revalidate_flushed(uint64_t virt_pc, uint32_t 
   JitBlock& b = m_blocks[index_of(virt_pc)];
   if (!(b.valid && b.code && b.tag == virt_pc && (b.asm_global || b.asn == asn)))
     return nullptr;
-  if (b.phys != phys_pc || b.src_sum != src_hash(dram + phys_pc, b.n_instr))
+  if (b.phys != phys_pc || b.src_sum != src_hash(dram + phys_pc, b.hash_len))
     return nullptr;
   b.flush_gen = m_flush_gen;
   b.gen = m_itb_gen;   // phys just validated against the live translation
@@ -1192,6 +1194,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   b->jit_body = (void*) ((uint8_t*) (void*) fn + body_off);   // chained re-entry (past prologue)
   b->body_off = (uint32_t) body_off;                          // to restore jit_body on revalidate
   b->src_sum  = src_hash(dram + phys, b->n_instr);            // source fingerprint (revalidate vs self-mod)
+  b->hash_len = b->n_instr;                                   // freeze the hash extent (n_instr drifts)
   b->prefix_len = plen;
   m_code_bytes += csz;   // track for the reclaim threshold (see flush())
 #ifdef JIT_STATS

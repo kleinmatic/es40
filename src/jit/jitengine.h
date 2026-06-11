@@ -46,7 +46,9 @@ public:
     uint32_t prefix_len;  // # safe ALU ops in code
     bool     compiled;    // compile has been attempted
     uint32_t body_off;    // jit_body's offset within code -- restores the chained entry on revalidate
-    uint64_t src_sum;     // hash of the n_instr source words at compile time (revalidate vs self-mod)
+    uint64_t src_sum;     // hash of the source words at compile time (revalidate vs self-mod)
+    uint32_t hash_len;    // word count src_sum covers -- frozen at compile time; n_instr drifts
+                          // (interrupt-truncated cold passes shrink it), so it must NOT key the hash
     uint64_t gen;         // ITB generation at which phys was last validated (see jit_indirect): a
                           // cheap gen==m_itb_gen compare skips the per-chain TB re-translation
     uint64_t flush_gen;   // icache-flush generation at which the code bytes were last hash-validated;
