@@ -49,6 +49,8 @@ public:
     uint64_t src_sum;     // hash of the n_instr source words at compile time (revalidate vs self-mod)
     uint64_t gen;         // ITB generation at which phys was last validated (see jit_indirect): a
                           // cheap gen==m_itb_gen compare skips the per-chain TB re-translation
+    uint64_t flush_gen;   // icache-flush generation at which the code bytes were last hash-validated;
+                          // stale => lookup misses and revalidate_flushed() re-hashes (lazy IC_FLUSH)
   };
 
   // Byte offsets (from the CAlphaCPU*) of the fields the inline load fast path reads,
@@ -70,12 +72,16 @@ public:
   static inline uint64_t index_of(uint64_t virt_pc) { return (virt_pc >> 2) & kIndexMask; }
 
   // Virtual+ASN keyed: no translation on the dispatch hot path. A global (ASM)
-  // block matches any ASN, mirroring the icache's hit rule.
+  // block matches any ASN, mirroring the icache's hit rule. flush_gen-stale blocks
+  // miss here; revalidate_flushed() resurrects them after a source-hash check.
   inline JitBlock* lookup(uint64_t virt_pc, uint32_t asn)
   {
     JitBlock& b = m_blocks[index_of(virt_pc)];
-    return (b.valid && b.tag == virt_pc && (b.asm_global || b.asn == asn)) ? &b : nullptr;
+    return (b.valid && b.flush_gen == m_flush_gen && b.tag == virt_pc && (b.asm_global || b.asn == asn)) ? &b : nullptr;
   }
+
+  // Lazy-flush survivor: hash-revalidate the slot in place (no interpreted pass, no re-record).
+  JitBlock* revalidate_flushed(uint64_t virt_pc, uint32_t asn, uint64_t phys_pc, const uint8_t* dram);
 
   JitBlock* record(uint64_t virt_pc, uint64_t phys_pc, uint32_t asn, bool asm_global, uint32_t n_instr, const uint8_t* dram);
   void compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper, void* hw_ld_helper, void* hw_mtpr_helper, void* hw_st_helper, void* indirect_helper, void* read_locked_helper, void* stc_helper, void* misc_helper, void* read_vpte_helper, void* itof_helper, void* ftoi_helper, void* fltl_helper);
@@ -103,6 +109,7 @@ private:
   JitBlock m_blocks[kCacheEntries];
   uint64_t m_recorded;
   uint64_t m_itb_gen = 0; // current ITB generation (bumped on every I-stream TB invalidate)
+  uint64_t m_flush_gen = 0; // current icache-flush generation (bumped by flush(); lazy IC_FLUSH/IMB)
   uint64_t m_code_bytes;  // compiled bytes since last reclaim (see flush())
   void*    m_rt;          // asmjit::JitRuntime*
   JitOffsets m_off = {};  // field offsets for the inline load fast path

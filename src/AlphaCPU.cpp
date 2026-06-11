@@ -782,6 +782,8 @@ void CAlphaCPU::jit_run(int budget)
 
 		// Hot path: virtual+ASN lookup, validated against the live physical.
 		CJitEngine::JitBlock* b = m_jit->lookup(start_virt, start_asn);
+		if (!b)   // lazy-flushed survivor? hash-revalidate in place (no interpreted pass)
+			b = m_jit->revalidate_flushed(start_virt, start_asn, start_phys, (const uint8_t*) dram_ptr);
 
 		// A valid block whose phys no longer matches = a page remap the virtual key can't see.
 		// The cold path below re-records it; log it -- it's the smoking gun for stale-chain bugs.

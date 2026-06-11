@@ -245,7 +245,7 @@ static const char* opcode_name(unsigned op);
 
 CJitEngine::CJitEngine() : m_recorded(0), m_code_bytes(0), m_rt(nullptr)
 {
-  flush();                                  // clears valid bits (m_rt still null)
+  memset(m_blocks, 0, sizeof(m_blocks));    // flush() is lazy (gen bump) -- zero the slots here
   m_rt = new asmjit::JitRuntime();
 #ifdef JIT_VERIFY
   m_v_exec = m_v_fail = 0;
@@ -282,18 +282,19 @@ CJitEngine::JitBlock* CJitEngine::record(uint64_t virt_pc, uint64_t phys_pc, uin
   // record() is only reached after the dispatcher validated the live physical (phys_pc), so the
   // block this returns is valid for the current ITB generation -- stamp it so chains skip re-checking.
   b.gen = m_itb_gen;
-  // Still valid + matching: nothing flushed us since last seen, so the code can't have changed.
-  if (b.valid && b.tag == virt_pc && (b.asm_global || b.asn == asn) && b.phys == phys_pc) {
+  // Still valid + matching + flush-fresh: nothing flushed us since last seen, so the code can't
+  // have changed. (flush_gen-stale must NOT take this no-hash path -- post-IMB needs the hash.)
+  if (b.valid && b.flush_gen == m_flush_gen && b.tag == virt_pc && (b.asm_global || b.asn == asn)
+      && b.phys == phys_pc) {
     b.n_instr = n_instr;
     return &b;
   }
-  // Revalidate: a flush cleared valid but kept the compiled code. If the block is unchanged
-  // (tag+phys+asn+len + source hash) reuse it instead of recompiling -- this avoids the recompile
-  // thrash from frequent icache flushes. The hash makes it safe vs self-modifying code (IMB):
-  // changed bytes -> different hash -> recompile below. (b.code != null => compiled from DRAM.)
+  // Revalidate: a flush dropped the block but kept the compiled code. If the block is unchanged
+  // (tag+phys+asn+len + source hash) reuse it instead of recompiling. 
   if (b.code && b.tag == virt_pc && (b.asm_global || b.asn == asn) && b.phys == phys_pc
       && b.n_instr == n_instr && b.src_sum == src_hash(dram + phys_pc, n_instr)) {
     b.valid = true;
+    b.flush_gen = m_flush_gen;
     b.jit_body = (void*) ((uint8_t*) (void*) b.code + b.body_off);   // restore chained re-entry
     return &b;
   }
@@ -304,6 +305,7 @@ CJitEngine::JitBlock* CJitEngine::record(uint64_t virt_pc, uint64_t phys_pc, uin
   b.asm_global = asm_global;
   b.n_instr = n_instr;
   b.valid = true;
+  b.flush_gen = m_flush_gen;
   b.code = nullptr;
   b.jit_body = nullptr;   // not compiled yet -> cached links to us must miss until compile
   b.link = nullptr;       // no cached successor yet
@@ -314,23 +316,40 @@ CJitEngine::JitBlock* CJitEngine::record(uint64_t virt_pc, uint64_t phys_pc, uin
   return &b;
 }
 
+// Lazy-flush survivor: the dispatcher calls this on a lookup miss, with the LIVE physical it just
+// translated. If the slot matches and its source bytes still hash the same, restamp and return it
+// straight to the hot path 
+CJitEngine::JitBlock* CJitEngine::revalidate_flushed(uint64_t virt_pc, uint32_t asn, uint64_t phys_pc, const uint8_t* dram)
+{
+  JitBlock& b = m_blocks[index_of(virt_pc)];
+  if (!(b.valid && b.code && b.tag == virt_pc && (b.asm_global || b.asn == asn)))
+    return nullptr;
+  if (b.phys != phys_pc || b.src_sum != src_hash(dram + phys_pc, b.n_instr))
+    return nullptr;
+  b.flush_gen = m_flush_gen;
+  b.gen = m_itb_gen;   // phys just validated against the live translation
+  b.jit_body = (void*) ((uint8_t*) (void*) b.code + b.body_off);
+  return &b;
+}
+
 void CJitEngine::flush()
 {
-  for (int i = 0; i < kCacheEntries; ++i) {
-    m_blocks[i].valid = false;
-    m_blocks[i].jit_body = nullptr;   // break stale cached links: the epilogue gates jumps on jit_body
-  }
-  // flush() runs on every TB invalidation (frequent); tearing down the asmjit
-  // runtime each time was the dominant cost. Code from invalidated blocks is
-  // unreachable, so only reclaim once it has grown past the cap. (delete+new, not
-  // reset()-and-reuse, which corrupted the JitAllocator block tree.)
+  // LAZY:  don't walk 16K slots each time. Bump the generation instead: stale blocks miss in 
+  // lookup() and revalidate_flushed() re-hashes their source bytes before they run again.
+  ++m_flush_gen;
+  // Reclaim stays eager: freeing the runtime dangles every code pointer, so the slots must drop
+  // them. 
   if (m_rt && m_code_bytes >= kReclaimBytes)
   {
     delete (asmjit::JitRuntime*) m_rt;
     m_rt = new asmjit::JitRuntime();
     m_code_bytes = 0;
-    // Runtime freed all code -> kept code pointers dangle; null them so revalidate can't reuse them.
-    for (int i = 0; i < kCacheEntries; ++i) { m_blocks[i].code = nullptr; m_blocks[i].compiled = false; }
+    for (int i = 0; i < kCacheEntries; ++i) {
+      m_blocks[i].valid = false;
+      m_blocks[i].code = nullptr;
+      m_blocks[i].jit_body = nullptr;
+      m_blocks[i].compiled = false;
+    }
   }
 }
 
@@ -1074,9 +1093,10 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   };
   // Field offsets within a JitBlock, so the epilogue can validate a cached successor via
   // [succ + off]. 
-  const uint32_t off_body = (uint32_t) ((char*) &b->jit_body - (char*) b);
-  const uint32_t off_tag  = (uint32_t) ((char*) &b->tag      - (char*) b);
-  const uint32_t off_gen  = (uint32_t) ((char*) &b->gen      - (char*) b);
+  const uint32_t off_body = (uint32_t) ((char*) &b->jit_body  - (char*) b);
+  const uint32_t off_tag  = (uint32_t) ((char*) &b->tag       - (char*) b);
+  const uint32_t off_gen  = (uint32_t) ((char*) &b->gen       - (char*) b);
+  const uint32_t off_fgen = (uint32_t) ((char*) &b->flush_gen - (char*) b);
   // Cached direct link: tail straight into our cached successor's body if it's still live
   // -- compiled (jit_body != 0, cleared on flush/recompile) AND still maps this exit's PC
   // (tag == R10) AND, for native targets, phys-validated under the current ITB generation
@@ -1091,7 +1111,12 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     a.test(x86::rcx, x86::rcx);                            a.jz(miss);
     a.mov(x86::rdx, x86::qword_ptr(x86::rax, off_tag));        // succ->tag
     a.cmp(x86::rdx, x86::r10);                             a.jne(miss);   // not this exit's target
-    // PALmode successor (tag bit 0): physically addressed, no staleness risk, but its shadow
+    // ALL successors: code must postdate the last icache flush (IMB/IC_FLUSH is lazy -- stale
+    // blocks revalidate by source hash in the dispatcher before they may run again).
+    a.mov(x86::rdx, imm((uint64_t) &m_flush_gen));
+    a.mov(x86::rdx, x86::qword_ptr(x86::rdx));
+    a.cmp(x86::qword_ptr(x86::rax, off_fgen), x86::rdx);  a.jne(miss);
+    // PALmode successor (tag bit 0): physically addressed, no remap risk, but its shadow
     // remap assumes SDE -- honor the dispatcher's guard. Native successor: require gen-fresh.
     Label pal_chk  = a.new_label();
     Label chain_ok = a.new_label();
