@@ -160,11 +160,18 @@ SafeOp classify(uint32_t ins, bool pal_block)
     }
     case 0x08: return OP_LDA;   // load address (Ra = Rb + disp16) -- pure ALU, no memory
     case 0x09: return OP_LDAH;  // load address high (Ra = Rb + (disp16 << 16))
-    case 0x19:                  // HW_MFPR: read IPR -> Ra. PALmode-only (else OPCDEC).
-      // ISUM (fn 0x0d) aggregates the live async interrupt-request lines (eir/slr/crr/pcr that
-      // devices raise from other threads)
+    case 0x19: {                // HW_MFPR: read IPR -> Ra. PALmode-only (else OPCDEC).
+      // ISUM (fn 0x0d) reads async interrupt lines -- compiled via log/replay. Only the IPRs
+      // jit_hw_mfpr implements compile: an unknown function must reach the interpreter's
+      // UNKNOWN2 (OPCDEC trap), which the helper's keep-Ra default would silently skip.
       if (!pal_block) return OP_NONE;
-      return OP_HW_MFPR;
+      const uint32_t fn = (ins >> 8) & 0xff;
+      const bool known = ((fn & 0xc0) == 0x40)                                   // PCTX group
+                      || (fn >= 0x05 && fn <= 0x0d) || fn == 0x0f || fn == 0x10
+                      || fn == 0x11 || fn == 0x14 || fn == 0x16 || fn == 0x27
+                      || fn == 0x2a || fn == 0x2b || fn == 0xc0 || fn == 0xc2 || fn == 0xc3;
+      return known ? OP_HW_MFPR : OP_NONE;
+    }
     case 0x1b: {                // HW_LD: read phys[Rb+disp12] -> Ra. PALmode-only. Compile the
       // physical forms (func 0/1) and the quad VPTE fetch (func 5, kernel-checked -- see
       // jit_read_vpte). Locked, virtual, alt and write-check forms stay interpreted.
