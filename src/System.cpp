@@ -990,6 +990,7 @@ void CSystem::WriteMem(u64 address, int dsize, u64 data, CSystemComponent* sourc
 			u64 paddr = a & U64(0xffffffff);
 			if (paddr > 0xb8fff || paddr < 0xb8000)
 			{ // skip legacy video
+#ifdef DEBUG_UNKMEM
 				if (source)
 				{
 					printf("Write to unknown memory %" PRIx64 " on PCI 0 from %s   \n",
@@ -998,12 +999,13 @@ void CSystem::WriteMem(u64 address, int dsize, u64 data, CSystemComponent* sourc
 				else
 					printf("Write to unknown memory %" PRIx64 " on PCI 0   \n",
 						a & U64(0xffffffff));
+#endif
 			}
 		}
 
 		if (a >= U64(0x80200000000) && a < U64(0x80300000000))
 		{
-
+#ifdef DEBUG_UNKMEM
 			// Unused PCI memory space
 			if (source)
 			{
@@ -1013,6 +1015,7 @@ void CSystem::WriteMem(u64 address, int dsize, u64 data, CSystemComponent* sourc
 			else
 				printf("Write to unknown memory %" PRIx64 " on PCI 1   \n",
 					a & U64(0xffffffff));
+#endif
 			return;
 		}
 
@@ -1245,6 +1248,7 @@ u64 CSystem::ReadMem(u64 address, int dsize, CSystemComponent* source)
 			u64 paddr = a & U64(0xffffffff);
 			if (paddr > 0xb8fff || paddr < 0xb8000)
 			{ // skip legacy video
+#ifdef DEBUG_UNKMEM
 				if (source)
 				{
 					printf("Read from unknown memory %" PRIx64 " on PCI 0 from %s   \n",
@@ -1253,6 +1257,7 @@ u64 CSystem::ReadMem(u64 address, int dsize, CSystemComponent* source)
 				else
 					printf("Read from unknown memory %" PRIx64 " on PCI 0   \n",
 						a & U64(0xffffffff));
+#endif
 			}
 
 			switch (dsize)
@@ -1268,6 +1273,7 @@ u64 CSystem::ReadMem(u64 address, int dsize, CSystemComponent* source)
 		{
 
 			// Unused PCI memory space — return all-ones (PCI master abort)
+#ifdef DEBUG_UNKMEM
 			if (source)
 			{
 				printf("Read from unknown memory %" PRIx64 " on PCI 1 from %s   \n",
@@ -1276,6 +1282,7 @@ u64 CSystem::ReadMem(u64 address, int dsize, CSystemComponent* source)
 			else
 				printf("Read from unknown memory %" PRIx64 " on PCI 1   \n",
 					a & U64(0xffffffff));
+#endif
 			switch (dsize)
 			{
 			case 8:   return X64_BYTE;
