@@ -22,6 +22,12 @@ matching your build toolchain is needed.
   
 ## Status  
   
+## 6/13/26 - JIT support is here!  
+Working for Windows 2210, OpenVMS, and Tru64. No other OSes tested.  
+Non-windows JIT support is experimental but should be fine.  
+OpenVMS is reading approximately 80 VUPS on my machine compared to interp  
+30 VUPS. So in that benchmark, about 2.5x improvement.  
+  
 ## 5/8/26 - TOY clock issue - SOUND SUPPORT! ES1370 Audio device! 
 For VMS it was not a one time boot prompt, I was wrong about how VMS handles  
 the time offsets. It sets the clock WITHOUT ARC's 1980 assumption.  
