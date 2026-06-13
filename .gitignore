@@ -427,6 +427,7 @@ src/config.h
 # Generated during build
 **/*.o
 src/base/.deps/**
+src/libasmjit.a
 
 # Binaries
 src/es40

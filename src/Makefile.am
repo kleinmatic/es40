@@ -99,6 +99,19 @@ es40_SOURCES = AliM1543C.cpp \
        gui/sdl.cpp \
 	base/Exception.cpp
 
+if ENABLE_ASMJIT
+include jit/asmjit.am
+AM_CPPFLAGS += -I$(top_srcdir)/src/jit -DES40_JIT \
+               -I$(top_srcdir)/third_party/asmjit -DASMJIT_NO_AARCH64
+
+es40_SOURCES += jit/jitengine.cpp
+
+es40_LDADD = libasmjit.a
+es40_idb_LDADD = libasmjit.a
+es40_lss_LDADD = libasmjit.a
+es40_lsm_LDADD = libasmjit.a
+endif
+
 es40_idb_SOURCES = $(es40_SOURCES)
 es40_lss_SOURCES = $(es40_SOURCES)
 es40_lsm_SOURCES = $(es40_SOURCES)
