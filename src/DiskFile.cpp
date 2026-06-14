@@ -131,6 +131,35 @@ void win32_select_file(HWND hwnd)
 		}
 	}
 }
+#elif defined(HAVE_SDL)
+#include <SDL3/SDL.h>
+
+static const SDL_DialogFileFilter filters[] = {
+	{ "ISO files",  "iso" },
+	{ "All files",   "*" }
+};
+
+static void SDLCALL callback(void* userdata, const char* const* filelist, int filter)
+{
+	if (!filelist) {
+		SDL_Log("An error occured: %s", SDL_GetError());
+		return;
+	} else if (!*filelist) {
+		SDL_Log("The user did not select any file.");
+		return;
+	}
+
+	if (cd_diskfiles.size() > 0) {
+		char* szFileName = SDL_strdup(filelist[0]);
+		SDL_Log("Change ISO file to %s", szFileName);
+		cd_diskfiles[0]->reload_file(szFileName);
+		SDL_free(szFileName);
+	}
+}
+
+void sdl_select_file(SDL_Window* window) {
+	SDL_ShowOpenFileDialog(callback, nullptr, window, filters, SDL_arraysize(filters), nullptr, false);
+}
 #endif
 
 CDiskFile::CDiskFile(CConfigurator* cfg, CSystem* sys, CDiskController* c,
