@@ -466,6 +466,7 @@ void CAlphaCPU::init()
 		o.fpen          = (uint32_t) ((char*) &state.fpen     - (char*) this);
 		o.exc_sum       = (uint32_t) ((char*) &state.exc_sum  - (char*) this);
 		o.f_base        = (uint32_t) ((char*) &state.f[0]     - (char*) this);
+		o.fpcr          = (uint32_t) ((char*) &state.fpcr    - (char*) this);
 		o.exc_addr      = (uint32_t) ((char*) &state.exc_addr - (char*) this);
 		o.pal_base      = (uint32_t) ((char*) &state.pal_base - (char*) this);
 		o.sde           = (uint32_t) ((char*) &state.sde      - (char*) this);

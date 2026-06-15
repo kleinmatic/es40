@@ -20,6 +20,7 @@ enum SafeOp {
   OP_ITOFS, OP_ITOFF, OP_ITOFT,                  // ITFP (0x14) int->FP reg moves: f[Fc] = fmt(Ra)
   OP_FTOIS, OP_FTOIT,                            // FPTI (0x1c) FP->int reg moves: Rc = fmt(f[Fa])
   OP_FLTL,                                       // FLTL (0x17) non-arithmetic: FPCR moves, CPYSx, FCMOVx, CVTLQ/QL
+  OP_CVTQT, OP_CVTQS,                            // FLTI (0x16) int->IEEE convert: f[Fc] = (T/S)(s64)f[Fb] via SSE
   OP_AND, OP_BIS, OP_XOR, OP_BIC, OP_ORNOT, OP_EQV,
   OP_CMOV,                       // INTL (0x11) conditional moves CMOVxx: Rc = cond(Ra) ? op2 : Rc
   OP_AMASK, OP_IMPLVER,          // INTL (0x11) CPU feature probes: Rc = op2 & ~CPU_AMASK / Rc = CPU_IMPLVER
@@ -137,6 +138,18 @@ SafeOp classify(uint32_t ins, bool pal_block)
       if (f17 == 0x025)      { if (((ins >> 21) & 0x1f) == 31) return OP_NONE; }
       else if (f17 != 0x024) { if ((ins & 0x1f) == 31) return OP_NONE; }
       return OP_FLTL;
+    }
+    case 0x16: { // FLTI (IEEE): SSE-inline the int->float converts; bail to the interp on traps/edges.
+      const uint32_t f = (ins >> 5) & 0x7ff;
+      if (((f & 0x600) == 0x200) || ((f & 0x500) == 0x400)) return OP_NONE;  // invalid qualifier -> OPCDEC
+      const uint32_t rnd = (f >> 6) & 3;            // 0=/C 1=/M 2=/N 3=/D (dynamic, runtime-checked)
+      if (rnd == 0 || rnd == 1) return OP_NONE;     // chopped / minus-inf: SSE rounds to nearest -> interpret
+      if (((f >> 8) & 7) == 7) return OP_NONE;      // /SUI: traps on every inexact -> interpret
+      if ((ins & 0x1f) == 31) return OP_NONE;       // Fc==31: interp zeroes f[31] per instr
+      const uint32_t baseop = f & 0x3f;
+      if (baseop == 0x3e && (f & 0x300) != 0x100) return OP_CVTQT;  // CVTQT: f[Fc] = (double)(s64) f[Fb]
+      if (baseop == 0x3c && (f & 0x300) != 0x100) return OP_CVTQS;  // CVTQS: f[Fc] = (single)(s64) f[Fb]
+      return OP_NONE;                               // other 0x16 ops (ADD/SUB/MUL/DIV/CMP/CVTT*): not yet
     }
     case 0x1c: // FPTI (CIX/BWX/MVI/FP-moves): the sign-extends, bit-counts, and FP->int register
       // moves compile here (CTPOP needs host POPCNT). MVI packed media (PERR/MIN/MAX/PK/UNPK)
@@ -1054,6 +1067,40 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       a.bind(ok);
       a.mov(x86::rax, x86::qword_ptr(x86::rsp, 32));
       a.mov(reg(rc), x86::rax);                        // Rc (reg() applies the PALshadow remap)
+      continue;
+    }
+
+    // CVTQT/CVTQS (0x16): f[Fc] = (double|single)(s64) f[Fb] via SSE. Inline the steady-state
+    // common case; bail to the interpreter (it owns rounding/traps/FPCR) on any edge that would
+    // trap or need non-nearest rounding. The verify carries fpcr/exc_sum across its two passes, so
+    // the inline path leaves them untouched -- correctness rests on the bails, not on FPCR upkeep.
+    if (op == OP_CVTQT || op == OP_CVTQS) {
+      const bool dyn = (((ins >> 11) & 3) == 3);      // /D: rounding is FPCR<59:58>, checked at runtime
+      Label bail = a.new_label(), fdone = a.new_label(), cont = a.new_label();
+      a.cmp(x86::byte_ptr(x86::rbp, m_off.fpen), imm(0));   // FPSTART: FP disabled -> FEN trap (interp)
+      a.je(bail);
+      a.mov(x86::qword_ptr(x86::rbp, m_off.exc_sum), imm(0));
+      if (dyn) {                                      // dynamic rounding: only nearest is SSE's default
+        a.mov(x86::rax, x86::qword_ptr(x86::rbp, m_off.fpcr));
+        a.shr(x86::rax, imm(58)); a.and_(x86::eax, imm(3));
+        a.cmp(x86::eax, imm(2)); a.jne(bail);         // FPCR<59:58> != round-to-nearest -> bail
+      }
+      if (rb == 31) a.xor_(x86::eax, x86::eax);        // val = (s64) f[Fb]  (Fb==31 -> 0)
+      else          a.mov(x86::rax, x86::qword_ptr(x86::rbp, m_off.f_base + 8u * rb));
+      if (op == OP_CVTQT) { a.cvtsi2sd(x86::xmm0, x86::rax); a.cvttsd2si(x86::rcx, x86::xmm0); }
+      else                { a.cvtsi2ss(x86::xmm0, x86::rax); a.cvttss2si(x86::rcx, x86::xmm0); }
+      a.cmp(x86::rcx, x86::rax);                       // round-trip equal -> exact (no inexact, no trap)
+      a.je(fdone);
+      a.bt(x86::qword_ptr(x86::rbp, m_off.fpcr), imm(56));   // inexact: FPCR.INE clear -> first one traps
+      a.jnc(bail);
+      a.bind(fdone);
+      if (op == OP_CVTQS) a.cvtss2sd(x86::xmm0, x86::xmm0);  // widen single -> register (T-format) bits
+      a.movq(x86::qword_ptr(x86::rbp, m_off.f_base + 8u * rc), x86::xmm0);
+      a.jmp(cont);
+      a.bind(bail);
+      set_pc(b->tag + 4 * (uint64_t) i);              // resume this instruction in the interpreter
+      a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::r14d); a.jmp(done);
+      a.bind(cont);
       continue;
     }
 
