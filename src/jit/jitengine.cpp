@@ -35,6 +35,7 @@ enum SafeOp {
   OP_STQ, OP_STL,                // memory-format stores: MEM[Rb + disp16] = Ra
   OP_STB, OP_STW,                // BWX byte/word stores (0x0e/0x0d): MEM[Rb + disp16].{b,w} = Ra
   OP_LDQ_U, OP_STQ_U,            // unaligned quad (0x0b/0x0f): MEM[(Rb+disp16) & ~7] load/store
+  OP_LDT, OP_LDS, OP_STT, OP_STS, // FP memory (0x23/0x22/0x27/0x26): f[Fa] <-> MEM, LDT/STT raw, LDS/STS ieee conv
   OP_LDA, OP_LDAH,               // load-address: Ra = Rb + disp16 (<<16 for LDAH); pure ALU
   OP_HW_MFPR,                    // HW_MFPR (0x19), PALmode only: Ra = IPR[(ins>>8)&0xff] via helper
   OP_HW_LDL, OP_HW_LDQ,          // HW_LD (0x1b) physical func 0/1, PALmode only: Ra = phys[Rb+disp12]
@@ -230,6 +231,10 @@ SafeOp classify(uint32_t ins, bool pal_block)
     case 0x0e: return OP_STB;   // BWX byte/word stores (MEM[Rb+disp16].{b,w} = Ra low bits)
     case 0x0d: return OP_STW;
     case 0x0f: return OP_STQ_U;  // unaligned quad store: MEM[(Rb+disp16) & ~7] = Ra
+    case 0x23: return OP_LDT;   // FP loads (f[Fa] = MEM[Rb+disp16]): LDT raw 8B
+    case 0x22: return OP_LDS;   //                                    LDS ieee_lds(4B)
+    case 0x27: return OP_STT;   // FP stores (MEM[Rb+disp16] = f[Fa]): STT raw 8B
+    case 0x26: return OP_STS;   //                                     STS ieee_sts(4B)
     case 0x2e:                  // STL_C / STQ_C: the store-conditional half of LL/SC. Ra is both the
     case 0x2f:                  // value AND the success/fail dest. Compile Ra!=31 (Ra==31 discards the
       // result into R31, so the verify can't capture it from a GPR); interpret those.
@@ -393,7 +398,7 @@ static const bool g_zapnot_init = [] {
   return true;
 }();
 
-void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper, void* hw_ld_helper, void* hw_mtpr_helper, void* hw_st_helper, void* indirect_helper, void* read_locked_helper, void* stc_helper, void* misc_helper, void* read_vpte_helper, void* itof_helper, void* ftoi_helper, void* fltl_helper)
+void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper, void* hw_ld_helper, void* hw_mtpr_helper, void* hw_st_helper, void* indirect_helper, void* read_locked_helper, void* stc_helper, void* misc_helper, void* read_vpte_helper, void* itof_helper, void* ftoi_helper, void* fltl_helper, void* fp_read_helper, void* fp_write_helper)
 {
   using namespace asmjit;
   // Reclaim must self-trigger here, NOT only in flush(): flush() runs when the guest executes
@@ -685,6 +690,91 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       a.bind(slow);
       emit_helper();
       a.bind(sdone);
+#endif
+      continue;
+    }
+
+    // FP memory (LDS/LDT/STS/STT): f[Fa] <-> MEM[Rb+disp16] with FPSTART (fpen gate + exc_sum=0).
+    // LDT/STT are raw 8B -> inline fast path; LDS/STS need ieee_lds/sts -> helper. Verify uses the
+    // helper only (FP loads replay the logged f-value, FP stores compare via jit_write's store-log).
+    if (op == OP_LDT || op == OP_LDS || op == OP_STT || op == OP_STS) {
+      const bool isload = (op == OP_LDT || op == OP_LDS);
+      const bool israw  = (op == OP_LDT || op == OP_STT);   // T-format: no conversion -> inline-able
+      const int  fa     = ra;                               // Fa = (ins>>21)&0x1f (FP regs: no shadow remap)
+      const int  size_bits = israw ? 64 : 32;
+      const int  disp   = (int) (int16_t) (ins & 0xFFFF);
+      const uint32_t descr = (israw ? 0u : (1u << 16)) | (uint32_t) size_bits;   // fmt(1=S)<<16 | size
+
+      if (isload && fa == 31) continue;   // LDT/LDS f31: interp skips the read (NOP)
+
+      if (rb == 31)  a.mov(x86::rdx, imm(disp));                       // va -> RDX (preserved for helper)
+      else        {  a.mov(x86::rdx, reg(rb)); if (disp) a.add(x86::rdx, imm(disp)); }
+
+      auto emit_helper = [&]() {
+#if defined(_WIN32)
+        a.mov(x86::rcx, x86::rbp);                                     // cpu  (va already in RDX)
+        a.mov(x86::r8d, imm(fa));                                      // Fa
+        a.mov(x86::r9d, imm((int) descr));                            // descr (fmt<<16 | size)
+#else
+        a.mov(x86::rsi, x86::rdx);                                     // va -> RSI (before RDX takes Fa)
+        a.mov(x86::rdi, x86::rbp);                                     // cpu
+        a.mov(x86::edx, imm(fa));                                      // Fa
+        a.mov(x86::ecx, imm((int) descr));                            // descr
+#endif
+        a.mov(x86::rax, imm((uint64_t) (isload ? fp_read_helper : fp_write_helper)));
+        a.call(x86::rax);                                             // jit_fp_read/write -> 0/1
+        Label ok = a.new_label();
+        a.test(x86::eax, x86::eax);
+        a.jz(ok);
+        set_pc(b->tag + 4 * (uint64_t) i);                            // resume at the faulting FP mem op
+        a.mov(x86::eax, imm(i));
+        a.add(x86::eax, x86::r14d);
+        a.jmp(done);
+        a.bind(ok);
+      };
+
+#ifdef JIT_VERIFY
+      emit_helper();
+#else
+      if (!israw) { emit_helper(); continue; }   // LDS/STS: ieee conversion only via the helper
+
+      // Inline fast path for LDT/STT: FPSTART (fpen gate + exc_sum=0), then the data-cache hit.
+      // misalign / cache miss / MMIO / fpen==0 fall to the helper. R11 = slot byte offset; RAX/R10/R9 scratch.
+      Label slow  = a.new_label();
+      Label fdone = a.new_label();
+      a.cmp(x86::byte_ptr(x86::rbp, m_off.fpen), imm(0));                          a.je(slow);   // fpen==0 -> FEN trap
+      a.mov(x86::qword_ptr(x86::rbp, m_off.exc_sum), imm(0));                                    // exc_sum = 0
+      a.test(x86::dl, imm(7));                                                     a.jnz(slow);  // 8-byte aligned
+      a.mov(x86::r11, x86::rdx);
+      a.shr(x86::r11, imm(13));
+      a.and_(x86::r11, imm(m_off.dpc_mask));
+      a.imul(x86::r11, x86::r11, imm(m_off.dpc_stride));
+      if (!isload) a.add(x86::r11, imm(m_off.dpc_write_row));                                    // store -> write cache [1]
+      a.mov(x86::r10, x86::rdx);
+      a.and_(x86::r10, imm(-0x2000));
+      a.cmp(x86::byte_ptr(x86::rbp, x86::r11, 0, m_off.dpc_valid), imm(0));        a.je(slow);
+      a.cmp(x86::qword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_virt_page), x86::r10); a.jne(slow);
+      a.mov(x86::eax, x86::dword_ptr(x86::rbp, m_off.state_cm));
+      a.cmp(x86::dword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_cm), x86::eax);        a.jne(slow);
+      a.mov(x86::eax, x86::dword_ptr(x86::rbp, m_off.state_asn0));
+      a.cmp(x86::dword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_asn), x86::eax);       a.jne(slow);
+      a.mov(x86::rax, x86::qword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_phys_base));
+      a.mov(x86::r10, x86::rdx);
+      a.and_(x86::r10, imm(0x1FFF));
+      a.or_(x86::rax, x86::r10);                                                   // rax = phys
+      a.cmp(x86::rax, x86::qword_ptr(x86::rbp, m_off.dram_size));                  a.jae(slow);
+      a.mov(x86::r10, x86::qword_ptr(x86::rbp, m_off.dram_ptr));
+      if (isload) {                                                               // LDT: f[fa] = MEM[phys]
+        a.mov(x86::rax, x86::qword_ptr(x86::r10, x86::rax));
+        a.mov(x86::qword_ptr(x86::rbp, m_off.f_base + fa * 8), x86::rax);
+      } else {                                                                    // STT: MEM[phys] = f[fa]
+        a.mov(x86::r9, x86::qword_ptr(x86::rbp, m_off.f_base + fa * 8));
+        a.mov(x86::qword_ptr(x86::r10, x86::rax), x86::r9);
+      }
+      a.jmp(fdone);
+      a.bind(slow);
+      emit_helper();
+      a.bind(fdone);
 #endif
       continue;
     }

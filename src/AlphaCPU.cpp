@@ -463,6 +463,9 @@ void CAlphaCPU::init()
 		o.check_int     = (uint32_t) ((char*) &state.check_int    - (char*) this);
 		o.check_timers  = (uint32_t) ((char*) &state.check_timers - (char*) this);
 		o.link_from     = (uint32_t) ((char*) &m_link_from        - (char*) this);
+		o.fpen          = (uint32_t) ((char*) &state.fpen     - (char*) this);
+		o.exc_sum       = (uint32_t) ((char*) &state.exc_sum  - (char*) this);
+		o.f_base        = (uint32_t) ((char*) &state.f[0]     - (char*) this);
 		o.exc_addr      = (uint32_t) ((char*) &state.exc_addr - (char*) this);
 		o.pal_base      = (uint32_t) ((char*) &state.pal_base - (char*) this);
 		o.sde           = (uint32_t) ((char*) &state.sde      - (char*) this);
@@ -833,6 +836,8 @@ void CAlphaCPU::jit_run(int budget)
 			// if an interrupt/trap diverts us mid-prefix.
 			u64 snap[64];   // 64: capture the PALshadow bank (r32..r63) for PALmode blocks
 			memcpy(snap, state.r, sizeof(snap));
+			u64 f_pre[64];  // FP file before the interp pass -- restored before the compiled pass below
+			memcpy(f_pre, state.f, sizeof(f_pre));   // so the compiled FP ops read the same f[] the interp did
 			const u32* vw = (const u32*) ((const u8*) dram_ptr + b->phys);
 			u32 vn = 0;   // loads recorded for replay
 			u32 sn = 0;   // stores recorded for the compiled-pass compare
@@ -856,8 +861,9 @@ void CAlphaCPU::jit_run(int budget)
 				const u32  miscfn    = (ins & 0xFFFF);
 				const bool is_miscrd = (opc == 0x18) && (miscfn == 0xC000 || miscfn == 0xE000 || miscfn == 0xF000);
 				const bool is_isum   = (opc == 0x19) && (((ins >> 8) & 0xff) == 0x0d);   // ISUM: async interrupt-summary
+				const bool is_fpld   = (opc == 0x22 || opc == 0x23);   // LDS/LDT: dest is f[lra], not a GPR
 				const bool isld = (opc == 0x28 || opc == 0x29 || opc == 0x0a || opc == 0x0c
-				                   || opc == 0x2a || opc == 0x2b || opc == 0x0b || is_hwld || is_miscrd || is_isum) && lra != 31;  // +LDBU/LDWU +LDx_L +LDQ_U +RPCC/RC/RS +ISUM
+				                   || opc == 0x2a || opc == 0x2b || opc == 0x0b || is_hwld || is_miscrd || is_isum || is_fpld) && lra != 31;  // +LDBU/LDWU +LDx_L +LDQ_U +RPCC/RC/RS +ISUM +LDS/LDT
 				u64 eva = 0;
 				if (isld && !is_miscrd && !is_isum)   // misc/ISUM reads have no effective address -- only a logged value
 				{
@@ -872,7 +878,8 @@ void CAlphaCPU::jit_run(int budget)
 				// 0/1) stores too, with a physical (untranslated) address and a 12-bit disp.
 				const bool is_sc   = (opc == 0x2e || opc == 0x2f);   // STL_C/STQ_C: store-conditional (success in Ra)
 				const bool is_hwst = (opc == 0x1f) && (((ins >> 12) & 0xf) <= 1);
-				const bool isst = (opc == 0x2c || opc == 0x2d || opc == 0x0d || opc == 0x0e || opc == 0x0f || is_sc || is_hwst);  // +STx_C +STQ_U
+				const bool is_fpst = (opc == 0x26 || opc == 0x27);   // STS/STT: value source is f[lra]
+				const bool isst = (opc == 0x2c || opc == 0x2d || opc == 0x0d || opc == 0x0e || opc == 0x0f || is_sc || is_hwst || is_fpst);  // +STx_C +STQ_U +STS/STT
 				u64 sva = 0, sval = 0;
 				if (isst)
 				{
@@ -881,7 +888,8 @@ void CAlphaCPU::jit_run(int budget)
 					                          : (int) (int16_t) (ins & 0xFFFF);        // STx:   16-bit
 					sva  = (srb == 31 ? (u64) 0 : state.r[RREG(srb)]) + (u64) sdisp;
 					if (opc == 0x0f) sva &= ~U64(7);   // STQ_U: address forced to 8-byte alignment
-					sval = (lra == 31 ? (u64) 0 : state.r[RREG(lra)]);
+					if (is_fpst) sval = (opc == 0x27) ? state.f[lra] : (u64) ieee_sts(state.f[lra]);   // STT raw / STS conv
+					else         sval = (lra == 31 ? (u64) 0 : state.r[RREG(lra)]);
 				}
 				// Computed jump (JMP/JSR/RET): target = Rb & ~3, taken before execute() (the
 				// jump's target uses the old Rb, even if Ra==Rb gets the return address after).
@@ -933,7 +941,7 @@ void CAlphaCPU::jit_run(int budget)
 				if (isld && vn < 64)
 				{
 					m_jit_vaddr[vn] = eva;
-					m_jit_vlog[vn] = state.r[RREG(lra)];   // shadow-aware: PALmode dest may be a shadow reg
+					m_jit_vlog[vn] = is_fpld ? state.f[lra] : state.r[RREG(lra)];   // FP dest -> f[]; shadow-aware GPR otherwise
 					vn++;
 				}
 				if (isst && sn < 64)
@@ -975,6 +983,7 @@ void CAlphaCPU::jit_run(int budget)
 				memcpy(f_interp, state.f, sizeof(f_interp));
 				u64 jr[64];   // 64: a compiled PALmode block may touch the shadow bank
 				memcpy(jr, snap, sizeof(jr));
+				memcpy(state.f, f_pre, sizeof(f_pre));   // restore the FP file like the GPRs: the compiled pass reads pre-interp f
 				const u64 interp_pc = state.pc;   // interpreter is authoritative for the PC
 				m_jit_vreplay = true;
 				m_jit_vlog_i = 0;
@@ -1075,7 +1084,8 @@ void CAlphaCPU::jit_run(int budget)
 				                     (void*) &CAlphaCPU::jit_read_locked, (void*) &CAlphaCPU::jit_stc,
 				                     (void*) &CAlphaCPU::jit_misc, (void*) &CAlphaCPU::jit_read_vpte,
 				                     (void*) &CAlphaCPU::jit_itof, (void*) &CAlphaCPU::jit_ftoi,
-				                     (void*) &CAlphaCPU::jit_fltl);
+				                     (void*) &CAlphaCPU::jit_fltl,
+				                     (void*) &CAlphaCPU::jit_fp_read, (void*) &CAlphaCPU::jit_fp_write);
 		}
 	}
 }
@@ -1140,6 +1150,44 @@ int CAlphaCPU::jit_read(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 
 	*out = dram_read(cpu->dram_ptr, phys, size_bits);
 	return 0;
+}
+
+// JIT FP load helper (static). LDS/LDT: f[fa] = convert(MEM[va]) per DO_LDS/DO_LDT. descr packs
+// size (low 16) and fmt (1=S/ieee_lds, 0=T/raw, high bits). FPSTART (fpen -> FEN bail; exc_sum=0).
+// Production reuses jit_read's side-effect-free cache read; verify replays the interp's CONVERTED
+// f-value (FP loads join the load log), so it consumes m_jit_vlog like an integer load.
+int CAlphaCPU::jit_fp_read(CAlphaCPU* cpu, u64 va, u32 fa, u32 descr)
+{
+	if (cpu->state.fpen == 0) return 1;       // FEN trap (FPSTART)
+	cpu->state.exc_sum = 0;
+	if (fa == 31) return 0;                    // f31 dest: interp skips the read
+	if (cpu->m_jit_vreplay)
+	{
+		const u32 i = cpu->m_jit_vlog_i++;
+		if (va != cpu->m_jit_vaddr[i])
+		{
+			static int n = 0;
+			if (n++ < 50)
+				printf("[JIT] FP LOAD ADDR MISMATCH: compiled va=%016llx interp va=%016llx\n",
+				       (unsigned long long) va, (unsigned long long) cpu->m_jit_vaddr[i]);
+		}
+		cpu->state.f[fa] = cpu->m_jit_vlog[i];   // logged converted value (no re-convert)
+		return 0;
+	}
+	u64 raw;
+	if (jit_read(cpu, va, (int) (descr & 0xffff), &raw)) return 1;   // production cache read
+	cpu->state.f[fa] = (descr >> 16) ? cpu->ieee_lds((u32) raw) : raw;   // LDS conv / LDT raw
+	return 0;
+}
+
+// JIT FP store helper (static). STS/STT: MEM[va] = convert(f[fa]) per DO_STS/DO_STT. Routes through
+// jit_write so verify compares vs the store log (FP stores join it) and production writes.
+int CAlphaCPU::jit_fp_write(CAlphaCPU* cpu, u64 va, u32 fa, u32 descr)
+{
+	if (cpu->state.fpen == 0) return 1;       // FEN trap (FPSTART)
+	cpu->state.exc_sum = 0;
+	const u64 value = (descr >> 16) ? (u64) cpu->ieee_sts(cpu->state.f[fa]) : cpu->state.f[fa];
+	return jit_write(cpu, va, (int) (descr & 0xffff), value);
 }
 
 // JIT MISC read helper (static). RPCC (sel 0): the wall-clock-pinned cycle counter (DO_RPCC, JIT

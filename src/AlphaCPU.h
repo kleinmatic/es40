@@ -508,6 +508,8 @@ private:
   static int jit_read_vpte(CAlphaCPU* cpu, u64 va, int size_bits, u64* out);    // HW_LD VPTE: kernel-checked virtual read
   static int jit_write(CAlphaCPU* cpu, u64 va, int size_bits, u64 value);
   static int jit_write_phys(CAlphaCPU* cpu, u64 phys, int size_bits, u64 value);  // HW_ST physical: no translation
+  static int jit_fp_read(CAlphaCPU* cpu, u64 va, u32 fa, u32 descr);   // LDS/LDT: f[fa] = convert(MEM[va])
+  static int jit_fp_write(CAlphaCPU* cpu, u64 va, u32 fa, u32 descr);  // STS/STT: MEM[va] = convert(f[fa])
   static u64 jit_stc(CAlphaCPU* cpu, u64 va, int size_bits, u64 value);           // STx_C: store-conditional
   // CALL_PAL OPCDEC trap (privileged func in user mode): GO_PAL(OPCDEC) incl. cpu_clear_lock.
   static void jit_opcdec(CAlphaCPU* cpu, u64 cpc);
