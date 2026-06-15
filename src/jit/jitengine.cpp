@@ -16,6 +16,7 @@ enum SafeOp {
   OP_S4ADDL, OP_S8ADDL, OP_S4SUBL, OP_S8SUBL,   // INTA (0x10) scaled longword: sext32((Ra*scale) +/- Rb)
   OP_CMPBGE,                                    // INTA (0x10) per-byte unsigned compare -> 8-bit mask
   OP_SEXTB, OP_SEXTW,                            // FPTI (0x1c) CIX/BWX: Rc = sign-extend byte/word of op2
+  OP_CTPOP, OP_CTLZ, OP_CTTZ,                    // FPTI (0x1c) CIX bit-count of op2: popcount / leading / trailing zeros
   OP_ITOFS, OP_ITOFF, OP_ITOFT,                  // ITFP (0x14) int->FP reg moves: f[Fc] = fmt(Ra)
   OP_FTOIS, OP_FTOIT,                            // FPTI (0x1c) FP->int reg moves: Rc = fmt(f[Fa])
   OP_FLTL,                                       // FLTL (0x17) non-arithmetic: FPCR moves, CPYSx, FCMOVx, CVTLQ/QL
@@ -53,6 +54,13 @@ static inline bool is_branch(SafeOp op) { return op >= OP_BEQ && op <= OP_BSR; }
 static inline bool is_store(SafeOp op)  { return op == OP_STQ || op == OP_STL; }
 // A terminator ends the block and writes its own next PC (branches + the computed jump).
 static inline bool is_terminator(SafeOp op) { return op == OP_JMP || op == OP_HW_RET || op == OP_CALL_PAL || is_branch(op); }
+
+// POPCNT isn't baseline x86-64 (pre-2008 CPUs lack it); query the host once. CTLZ/CTTZ use
+// baseline BSR/BSF, so only CTPOP is gated -- it stays interpreted when the host lacks POPCNT.
+static bool host_has_popcnt() {
+  static const bool ok = asmjit::CpuInfo::host().features().x86().has_popcnt();
+  return ok;
+}
 
 // Safe = goto-free, register-only operate-format ops (no trap, memory, or branch).
 // pal_block enables PALmode-only ops (HW_MFPR): outside PALmode they'd OPCDEC, so only
@@ -130,11 +138,14 @@ SafeOp classify(uint32_t ins, bool pal_block)
       else if (f17 != 0x024) { if ((ins & 0x1f) == 31) return OP_NONE; }
       return OP_FLTL;
     }
-    case 0x1c: // FPTI (CIX/BWX/MVI/FP-moves): the pure-ALU sign-extends and the FP->int register
-      // moves compile here. CTPOP/CTLZ/CTTZ (bit-count: zero-handling + popcnt/lzcnt CPU feature)
-      // and MVI packed media (PERR/MIN/MAX/PK/UNPK) stay interpreted for now.
+    case 0x1c: // FPTI (CIX/BWX/MVI/FP-moves): the sign-extends, bit-counts, and FP->int register
+      // moves compile here (CTPOP needs host POPCNT). MVI packed media (PERR/MIN/MAX/PK/UNPK)
+      // stays interpreted for now.
       if (func == 0x00) return OP_SEXTB;   // sign-extend byte of op2
       if (func == 0x01) return OP_SEXTW;   // sign-extend word of op2
+      if (func == 0x32) return OP_CTLZ;    // count leading zeros of op2  (BSR; op2==0 -> 64)
+      if (func == 0x33) return OP_CTTZ;    // count trailing zeros of op2 (BSF; op2==0 -> 64)
+      if (func == 0x30 && host_has_popcnt()) return OP_CTPOP;   // popcount; interpret when host lacks POPCNT
       if (func == 0x70 || func == 0x78) {  // FTOIT / FTOIS: Rb must be 31; Rc==31 -> interpret
         if (((ins >> 16) & 0x1f) != 31 || (ins & 0x1f) == 31) return OP_NONE;
         return (func == 0x70) ? OP_FTOIT : OP_FTOIS;
@@ -1284,6 +1295,25 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
 
       case OP_SEXTB: op2_rcx(); a.movsx(x86::rax, x86::cl); break;   // Rc = sign-extend low byte of op2 (V_2)
       case OP_SEXTW: op2_rcx(); a.movsx(x86::rax, x86::cx); break;   // Rc = sign-extend low word of op2 (V_2)
+
+      case OP_CTPOP: op2_rcx(); a.popcnt(x86::rax, x86::rcx); break; // Rc = popcount(op2); POPCNT(0)==0 == CTPOP(0)
+      case OP_CTLZ: {                                                // Rc = (op2==0) ? 64 : 63 - BSR(op2)
+        op2_rcx();
+        Label zero = a.new_label(), done = a.new_label();
+        a.bsr(x86::rax, x86::rcx);            // ZF=1 if op2==0; else rax = index of MSB (0..63)
+        a.jz(zero);
+        a.xor_(x86::rax, imm(63));            // 63 - bsr  (bsr in [0,63], so 63-n == n^63)
+        a.jmp(done);
+        a.bind(zero); a.mov(x86::eax, imm(64));
+        a.bind(done);
+        break;
+      }
+      case OP_CTTZ:                                                  // Rc = (op2==0) ? 64 : BSF(op2)
+        op2_rcx();
+        a.bsf(x86::rax, x86::rcx);            // ZF=1 if op2==0; else rax = index of LSB
+        a.mov(x86::r10d, imm(64));            // MOV preserves ZF
+        a.cmovz(x86::rax, x86::r10);          // op2==0 -> 64 (BSF leaves rax undefined)
+        break;
 
       case OP_AMASK:    // Rc = op2 & ~CPU_AMASK -- EV68 feature mask 0x1307 (keep in sync w/ cpu_defs.h);
         op2_rcx();      // classify enforced Ra==31 (the Ra!=31 form traps OPCDEC in the interpreter)
