@@ -48,10 +48,12 @@ enum SafeOp {
   OP_HW_RET,                     // HW_RET (0x1e), PALmode: PC = Rb & ~2 (computed jump, the PAL return)
   OP_CALL_PAL,                   // CALL_PAL (0x00): save R23/exc_addr; PC = pal_base | entry offset
   // Branch-format terminators (contiguous; see is_branch). Conditional on Ra, plus BR/BSR.
-  OP_BEQ, OP_BNE, OP_BLT, OP_BLE, OP_BGT, OP_BGE, OP_BLBC, OP_BLBS, OP_BR, OP_BSR
+  OP_BEQ, OP_BNE, OP_BLT, OP_BLE, OP_BGT, OP_BGE, OP_BLBC, OP_BLBS, OP_BR, OP_BSR,
+  OP_FBEQ, OP_FBNE, OP_FBLT, OP_FBLE, OP_FBGT, OP_FBGE   // FP branches (0x31-0x37): branch on f[Fa] vs 0.0
 };
 
-static inline bool is_branch(SafeOp op) { return op >= OP_BEQ && op <= OP_BSR; }
+static inline bool is_branch(SafeOp op) { return op >= OP_BEQ && op <= OP_FBGE; }
+static inline bool is_fp_branch(SafeOp op) { return op >= OP_FBEQ && op <= OP_FBGE; }
 static inline bool is_store(SafeOp op)  { return op == OP_STQ || op == OP_STL; }
 // A terminator ends the block and writes its own next PC (branches + the computed jump).
 static inline bool is_terminator(SafeOp op) { return op == OP_JMP || op == OP_HW_RET || op == OP_CALL_PAL || is_branch(op); }
@@ -270,6 +272,9 @@ SafeOp classify(uint32_t ins, bool pal_block)
     case 0x3a: return OP_BLT;   case 0x3b: return OP_BLE;
     case 0x3c: return OP_BLBS;  case 0x3d: return OP_BNE;
     case 0x3e: return OP_BGE;   case 0x3f: return OP_BGT;
+    case 0x31: return OP_FBEQ;  case 0x32: return OP_FBLT;   // FP branches: FPSTART, then f[Fa] vs 0.0
+    case 0x33: return OP_FBLE;  case 0x35: return OP_FBNE;
+    case 0x36: return OP_FBGE;  case 0x37: return OP_FBGT;
   }
   return OP_NONE;
 }
@@ -1191,6 +1196,46 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
 
     // Branch terminators: compute the target into state.pc, then end the block. The
     // branch is at index i, so the PC of the next instruction is b->tag + 4*(i+1).
+    // FP conditional branches (0x31-0x37): FPSTART, then branch on f[Fa] vs 0.0 (sign-magnitude).
+    // Map the bits to a monotonic signed s = sign ? -magnitude : magnitude so the integer signed
+    // cmov conditions apply directly; -0 -> s=0 (matches the interp's zero handling), NaN by bits.
+    if (is_fp_branch(op)) {
+      const int64_t  bdisp = (int64_t) ((uint64_t) (ins & 0x1FFFFF) << 43) >> 43;  // sext disp21
+      const uint64_t fall  = b->tag + 4 * (uint64_t) (i + 1);
+      const uint64_t tgt   = fall + (uint64_t) (bdisp * 4);
+      Label bail = a.new_label(), cont = a.new_label();
+      a.cmp(x86::byte_ptr(x86::rbp, m_off.fpen), imm(0));   // FPSTART: FP disabled -> FEN trap (interp)
+      a.je(bail);
+      a.mov(x86::qword_ptr(x86::rbp, m_off.exc_sum), imm(0));
+      if (ra == 31) a.xor_(x86::eax, x86::eax);             // f[31] = 0 -> s = 0
+      else {
+        a.mov(x86::rax, x86::qword_ptr(x86::rbp, m_off.f_base + 8u * ra));
+        a.mov(x86::rcx, x86::rax);
+        a.sar(x86::rcx, imm(63));                           // rcx = sign mask (0 or -1)
+        a.btr(x86::rax, imm(63));                           // rax = magnitude (sign bit cleared)
+        a.xor_(x86::rax, x86::rcx); a.sub(x86::rax, x86::rcx);   // rax = s = sign ? -magnitude : magnitude
+      }
+      a.mov(x86::r10, imm(fall));
+      a.mov(x86::r11, imm(tgt));
+      a.test(x86::rax, x86::rax);
+      switch (op) {
+        case OP_FBEQ: a.cmovz(x86::r10, x86::r11);  break;
+        case OP_FBNE: a.cmovnz(x86::r10, x86::r11); break;
+        case OP_FBLT: a.cmovs(x86::r10, x86::r11);  break;
+        case OP_FBGE: a.cmovns(x86::r10, x86::r11); break;
+        case OP_FBLE: a.cmovle(x86::r10, x86::r11); break;
+        case OP_FBGT: a.cmovg(x86::r10, x86::r11);  break;
+        default: break;
+      }
+      a.mov(x86::qword_ptr(x86::rbp, m_off.state_pc), x86::r10);
+      a.jmp(cont);
+      a.bind(bail);
+      set_pc(b->tag + 4 * (uint64_t) i);                    // resume this instruction in the interpreter
+      a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::r14d); a.jmp(done);
+      a.bind(cont);
+      continue;
+    }
+
     if (is_branch(op)) {
       const int64_t  bdisp = (int64_t) ((uint64_t) (ins & 0x1FFFFF) << 43) >> 43;  // sext disp21
       const uint64_t fall  = b->tag + 4 * (uint64_t) (i + 1);
