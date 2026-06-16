@@ -2,10 +2,20 @@
 #ifdef ES40_JIT
 
 #include "jitengine.h"
+#include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #define ASMJIT_STATIC
 #include <asmjit/x86.h>
+
+// asmjit's x64 backend emits x86-64; asmjit's CallConv maps the host C ABI
+// (Microsoft x64 or System V) from the build env. Block any other host arch 
+// rather than silently emit for a 32-bit or non-x86 target. (until ARM is added)
+// I don't forsee ever wanting to add or use 32-bit x86. 
+#if !defined(_M_X64) && !defined(__x86_64__)
+#error "ES40_JIT requires an x86-64 host (asmjit x64 backend emits 64-bit code)"
+#endif
 
 namespace {
 
@@ -524,17 +534,28 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   CodeHolder code;
   if (code.init(((JitRuntime*) m_rt)->environment()) != Error::kOk) return;
   x86::Assembler a(&code);
+
+  // Host integer-argument registers:
+  // Win64 {rcx,rdx,r8,r9}; System V {rdi,rsi,rdx,rcx}. aq(i)/ad(i) = the i argument as a
+  // 64-/32-bit register; e mit_call (below) marshals into them, replacing out usage of 
+  // #ifdef _WIN32. Helpers limited to <= 4 integer arguments.
+  CallConv cc;
+  (void) cc.init(CallConvId::kCDecl, ((JitRuntime*) m_rt)->environment());
+  const uint8_t* gpa = cc.passed_order(RegGroup::kGp);
+  auto aq = [&](int i) { return x86::gpq(gpa[i]); };
+  auto ad = [&](int i) { return x86::gpd(gpa[i]); };
+  // cpu (RBP), regs (RBX) and the chain counter (R14) live across helper calls, so they must
+  // be callee-saved under the host ABI. Verified at dev time (compiled out in NDEBUG builds).
+  [[maybe_unused]] const uint32_t kPinnedGp =
+      (1u << x86::rbp.id()) | (1u << x86::rbx.id()) | (1u << x86::r14.id());
+  assert((((uint32_t) cc.preserved_regs(RegGroup::kGp)) & kPinnedGp) == kPinnedGp);
+
   a.push(x86::rbx);
   a.push(x86::rbp);
   a.push(x86::r14);            // callee-saved: accumulates the chain's instruction count
   a.sub(x86::rsp, imm(48));    // 32 shadow + load-out slot; keeps RSP 16-aligned at calls
-#ifdef _WIN32
-  a.mov(x86::rbp, x86::rcx);   // cpu
-  a.mov(x86::rbx, x86::rdx);   // regs base
-#else
-  a.mov(x86::rbp, x86::rdi);   // cpu
-  a.mov(x86::rbx, x86::rsi);   // regs base
-#endif
+  a.mov(x86::rbp, aq(0));      // cpu  (arg 0)
+  a.mov(x86::rbx, aq(1));      // regs (arg 1)
   a.xor_(x86::r14d, x86::r14d);   // instruction count := 0
 
   Label done = a.new_label();  // shared exit: restore frame + ret (EAX preset by caller)
@@ -585,6 +606,32 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       else               a.mov(x86::rcx, reg(rb));
     };
 
+    // ABI-native helper call.
+    // Each JitArg names an argument source; the k # source is placed in arg register k (aq/ad).
+    // Non-immediate sources are emitted before immediates so a size/selector immediate can't
+    // overwrite RDX while JA_VA (the only register-sourced argument) still needs it.
+    enum JitArgKind { JA_CPU, JA_GP, JA_GPZ, JA_VA, JA_OUT, JA_R10, JA_I32, JA_I64 };
+    struct JitArg { JitArgKind k; uint64_t v; };
+    auto emit_call = [&](void* fn, std::initializer_list<JitArg> as) {
+      auto place = [&](int k, const JitArg& s) {
+        switch (s.k) {
+          case JA_CPU: a.mov(aq(k), x86::rbp);                              break;  // cpu
+          case JA_GP:  a.mov(aq(k), reg((int) s.v));                        break;  // r[v]
+          case JA_GPZ: if (s.v == 31) a.xor_(ad(k), ad(k));                         // r[v], or 0 if R31
+                       else           a.mov(aq(k), reg((int) s.v));         break;
+          case JA_VA:  if (aq(k).id() != x86::rdx.id()) a.mov(aq(k), x86::rdx); break;  // va: precomputed in RDX
+          case JA_OUT: a.lea(aq(k), x86::qword_ptr(x86::rsp, 32));          break;  // &out slot
+          case JA_R10: a.mov(aq(k), x86::r10);                             break;  // value already in R10
+          case JA_I32: a.mov(ad(k), imm((uint32_t) s.v));                  break;
+          case JA_I64: a.mov(aq(k), imm((uint64_t) s.v));                  break;
+        }
+      };
+      int k = 0; for (const JitArg& s : as) { if (s.k != JA_I32 && s.k != JA_I64) place(k, s); ++k; }
+      k = 0;     for (const JitArg& s : as) { if (s.k == JA_I32 || s.k == JA_I64) place(k, s); ++k; }
+      a.mov(x86::rax, imm((uint64_t) fn));
+      a.call(x86::rax);
+    };
+
     // Memory-format loads: va = regs[Rb] + disp16.
     if (op == OP_LDQ || op == OP_LDL || op == OP_LDBU || op == OP_LDWU || op == OP_LDQ_U) {
       if (ra == 31) continue;            // LDx R31 is a NOP (interpreter skips the read)
@@ -599,18 +646,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       // (0..i-1 committed). In JIT_VERIFY builds this is the ONLY path, so the helper's
       // replay keeps the differential check race-free.
       auto emit_helper = [&]() {
-#if defined(_WIN32)
-        a.mov(x86::rcx, x86::rbp);                       // cpu
-        a.mov(x86::r8d, imm(size_bits));                 // size in bits
-        a.lea(x86::r9, x86::qword_ptr(x86::rsp, 32));    // &out slot
-#else
-        a.mov(x86::rdi, x86::rbp);                       // cpu
-        a.mov(x86::rsi, x86::rdx);                       // va is in RDX, move to RSI
-        a.mov(x86::edx, imm(size_bits));                 // size in bits
-        a.lea(x86::rcx, x86::qword_ptr(x86::rsp, 32));   // &out slot
-#endif
-        a.mov(x86::rax, imm((uint64_t) read_helper));
-        a.call(x86::rax);
+        emit_call(read_helper, { {JA_CPU, 0}, {JA_VA, 0}, {JA_I32, (uint64_t) size_bits}, {JA_OUT, 0} });
         Label ok = a.new_label();
         a.test(x86::eax, x86::eax);
         a.jz(ok);
@@ -679,20 +715,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       if (op == OP_STQ_U) a.and_(x86::rdx, imm(~(uint64_t) 7));        // STQ_U: force 8-byte alignment
 
       auto emit_helper = [&]() {
-#if defined(_WIN32)
-        if (ra == 31)  a.xor_(x86::r9d, x86::r9d);                     // value -> R9 (R31 == 0)
-        else           a.mov(x86::r9, reg(ra));
-        a.mov(x86::rcx, x86::rbp);                                     // cpu  (va already in RDX)
-        a.mov(x86::r8d, imm(size_bits));                               // size in bits
-#else
-        a.mov(x86::rsi, x86::rdx);                                     // va -> RSI (before RDX takes size)
-        if (ra == 31)  a.xor_(x86::ecx, x86::ecx);                     // value -> RCX (R31 == 0)
-        else           a.mov(x86::rcx, reg(ra));
-        a.mov(x86::rdi, x86::rbp);                                     // cpu
-        a.mov(x86::edx, imm(size_bits));                               // size in bits
-#endif
-        a.mov(x86::rax, imm((uint64_t) write_helper));
-        a.call(x86::rax);                                             // jit_write(cpu, va, size, value)
+        emit_call(write_helper, { {JA_CPU, 0}, {JA_VA, 0}, {JA_I32, (uint64_t) size_bits}, {JA_GPZ, (uint64_t) ra} });  // jit_write(cpu, va, size, value)
         Label ok = a.new_label();
         a.test(x86::eax, x86::eax);
         a.jz(ok);
@@ -765,18 +788,8 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       else        {  a.mov(x86::rdx, reg(rb)); if (disp) a.add(x86::rdx, imm(disp)); }
 
       auto emit_helper = [&]() {
-#if defined(_WIN32)
-        a.mov(x86::rcx, x86::rbp);                                     // cpu  (va already in RDX)
-        a.mov(x86::r8d, imm(fa));                                      // Fa
-        a.mov(x86::r9d, imm((int) descr));                            // descr (fmt<<16 | size)
-#else
-        a.mov(x86::rsi, x86::rdx);                                     // va -> RSI (before RDX takes Fa)
-        a.mov(x86::rdi, x86::rbp);                                     // cpu
-        a.mov(x86::edx, imm(fa));                                      // Fa
-        a.mov(x86::ecx, imm((int) descr));                            // descr
-#endif
-        a.mov(x86::rax, imm((uint64_t) (isload ? fp_read_helper : fp_write_helper)));
-        a.call(x86::rax);                                             // jit_fp_read/write -> 0/1
+        emit_call(isload ? fp_read_helper : fp_write_helper,
+                  { {JA_CPU, 0}, {JA_VA, 0}, {JA_I32, (uint64_t) fa}, {JA_I32, (uint64_t) descr} });  // jit_fp_read/write -> 0/1
         Label ok = a.new_label();
         a.test(x86::eax, x86::eax);
         a.jz(ok);
@@ -839,21 +852,9 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     if (op == OP_STL_C || op == OP_STQ_C) {
       const int disp = (int) (int16_t) (ins & 0xFFFF);
       const int size_bits = (op == OP_STQ_C) ? 64 : 32;
-#if defined(_WIN32)
       if (rb == 31)  a.mov(x86::rdx, imm(disp));                       // va -> RDX
       else        {  a.mov(x86::rdx, reg(rb)); if (disp) a.add(x86::rdx, imm(disp)); }
-      a.mov(x86::r9, reg(ra));                                         // value (Ra) -> R9
-      a.mov(x86::rcx, x86::rbp);                                       // cpu
-      a.mov(x86::r8d, imm(size_bits));                                 // size in bits
-#else
-      if (rb == 31)  a.mov(x86::rsi, imm(disp));                       // va -> RSI
-      else        {  a.mov(x86::rsi, reg(rb)); if (disp) a.add(x86::rsi, imm(disp)); }
-      a.mov(x86::rcx, reg(ra));                                        // value (Ra) -> RCX
-      a.mov(x86::rdi, x86::rbp);                                       // cpu
-      a.mov(x86::edx, imm(size_bits));                                 // size in bits
-#endif
-      a.mov(x86::rax, imm((uint64_t) stc_helper));
-      a.call(x86::rax);                                               // jit_stc(cpu, va, size, value)
+      emit_call(stc_helper, { {JA_CPU, 0}, {JA_VA, 0}, {JA_I32, (uint64_t) size_bits}, {JA_GP, (uint64_t) ra} });  // jit_stc(cpu, va, size, value)
       Label nobail = a.new_label();
       a.test(x86::eax, imm(0x100));                                   // 0x100 = translation-fault bail
       a.jz(nobail);
@@ -873,22 +874,11 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       if (ra == 31) continue;                                  // R31 dest discards the read
       const int disp = (int) ((int32_t) (ins << 20) >> 20);    // sign-extend 12-bit displacement
       const int size_bits = (op == OP_HW_LDL) ? 32 : 64;
-#if defined(_WIN32)
       if (rb == 31)  a.mov(x86::rdx, imm(disp));               // address (phys, or virtual for VPTE) -> RDX
       else        {  a.mov(x86::rdx, reg(rb)); if (disp) a.add(x86::rdx, imm(disp)); }
-      a.mov(x86::rcx, x86::rbp);                               // cpu
-      a.mov(x86::r8d, imm(size_bits));                         // size in bits
-      a.lea(x86::r9, x86::qword_ptr(x86::rsp, 32));            // &out slot
-#else
-      if (rb == 31)  a.mov(x86::rsi, imm(disp));               // address (phys, or virtual for VPTE) -> RSI
-      else        {  a.mov(x86::rsi, reg(rb)); if (disp) a.add(x86::rsi, imm(disp)); }
-      a.mov(x86::rdi, x86::rbp);                               // cpu
-      a.mov(x86::edx, imm(size_bits));                         // size in bits
-      a.lea(x86::rcx, x86::qword_ptr(x86::rsp, 32));           // &out slot
-#endif
       // func 5 -> jit_read_vpte (kernel-checked virtual read); else jit_read_phys
-      a.mov(x86::rax, imm((uint64_t) (op == OP_HW_LDQ_VPTE ? read_vpte_helper : hw_ld_helper)));
-      a.call(x86::rax);
+      emit_call(op == OP_HW_LDQ_VPTE ? read_vpte_helper : hw_ld_helper,
+                { {JA_CPU, 0}, {JA_VA, 0}, {JA_I32, (uint64_t) size_bits}, {JA_OUT, 0} });
       Label ok = a.new_label();
       a.test(x86::eax, x86::eax);
       a.jz(ok);
@@ -908,21 +898,9 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     if (op == OP_LDL_L || op == OP_LDQ_L) {
       const int disp = (int) (int16_t) (ins & 0xFFFF);
       const int size_bits = (op == OP_LDQ_L) ? 64 : 32;
-#if defined(_WIN32)
       if (rb == 31)  a.mov(x86::rdx, imm(disp));               // va -> RDX
       else        {  a.mov(x86::rdx, reg(rb)); if (disp) a.add(x86::rdx, imm(disp)); }
-      a.mov(x86::rcx, x86::rbp);                               // cpu
-      a.mov(x86::r8d, imm(size_bits));                         // size in bits
-      a.lea(x86::r9, x86::qword_ptr(x86::rsp, 32));            // &out slot
-#else
-      if (rb == 31)  a.mov(x86::rsi, imm(disp));               // va -> RSI
-      else        {  a.mov(x86::rsi, reg(rb)); if (disp) a.add(x86::rsi, imm(disp)); }
-      a.mov(x86::rdi, x86::rbp);                               // cpu
-      a.mov(x86::edx, imm(size_bits));                         // size in bits
-      a.lea(x86::rcx, x86::qword_ptr(x86::rsp, 32));           // &out slot
-#endif
-      a.mov(x86::rax, imm((uint64_t) read_locked_helper));
-      a.call(x86::rax);                                        // jit_read_locked(cpu, va, size, &out)
+      emit_call(read_locked_helper, { {JA_CPU, 0}, {JA_VA, 0}, {JA_I32, (uint64_t) size_bits}, {JA_OUT, 0} });  // jit_read_locked(cpu, va, size, &out)
       Label ok = a.new_label();
       a.test(x86::eax, x86::eax);
       a.jz(ok);
@@ -940,19 +918,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     // field directly. The verify pass snapshots+compares those live-state writes. No fault/bail.
     if (op == OP_HW_MTPR) {
       const uint32_t function = (ins >> 8) & 0xff;
-#if defined(_WIN32)
-      a.mov(x86::rcx, x86::rbp);                               // cpu
-      a.mov(x86::edx, imm(function));                          // IPR function number
-      if (rb == 31)  a.xor_(x86::r8d, x86::r8d);               // value -> R8 (R31 == 0)
-      else           a.mov(x86::r8, reg(rb));
-#else
-      a.mov(x86::rdi, x86::rbp);                               // cpu
-      a.mov(x86::esi, imm(function));                          // IPR function number
-      if (rb == 31)  a.xor_(x86::edx, x86::edx);               // value -> RDX (R31 == 0)
-      else           a.mov(x86::rdx, reg(rb));
-#endif
-      a.mov(x86::rax, imm((uint64_t) hw_mtpr_helper));
-      a.call(x86::rax);                                        // jit_hw_mtpr(cpu, function, value)
+      emit_call(hw_mtpr_helper, { {JA_CPU, 0}, {JA_I32, (uint64_t) function}, {JA_GPZ, (uint64_t) rb} });  // jit_hw_mtpr(cpu, function, value)
       continue;
     }
 
@@ -962,23 +928,9 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     if (op == OP_HW_STL || op == OP_HW_STQ) {
       const int disp = (int) ((int32_t) (ins << 20) >> 20);    // sign-extend 12-bit displacement
       const int size_bits = (op == OP_HW_STQ) ? 64 : 32;
-#if defined(_WIN32)
       if (rb == 31)  a.mov(x86::rdx, imm(disp));               // phys addr -> RDX
       else        {  a.mov(x86::rdx, reg(rb)); if (disp) a.add(x86::rdx, imm(disp)); }
-      if (ra == 31)  a.xor_(x86::r9d, x86::r9d);               // value -> R9 (R31 == 0)
-      else           a.mov(x86::r9, reg(ra));
-      a.mov(x86::rcx, x86::rbp);                               // cpu
-      a.mov(x86::r8d, imm(size_bits));                         // size in bits
-#else
-      if (rb == 31)  a.mov(x86::rsi, imm(disp));               // phys addr -> RSI
-      else        {  a.mov(x86::rsi, reg(rb)); if (disp) a.add(x86::rsi, imm(disp)); }
-      if (ra == 31)  a.xor_(x86::ecx, x86::ecx);               // value -> RCX (R31 == 0)
-      else           a.mov(x86::rcx, reg(ra));
-      a.mov(x86::rdi, x86::rbp);                               // cpu
-      a.mov(x86::edx, imm(size_bits));                         // size in bits
-#endif
-      a.mov(x86::rax, imm((uint64_t) hw_st_helper));
-      a.call(x86::rax);                                        // jit_write_phys(cpu, phys, size, value)
+      emit_call(hw_st_helper, { {JA_CPU, 0}, {JA_VA, 0}, {JA_I32, (uint64_t) size_bits}, {JA_GPZ, (uint64_t) ra} });  // jit_write_phys(cpu, phys, size, value)
       Label ok = a.new_label();
       a.test(x86::eax, x86::eax);
       a.jz(ok);
@@ -1009,17 +961,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     // a pure read
     if (op == OP_HW_MFPR) {
       if (ra != 31) {                                  // MFPR R31 discards the value (R31 is hardwired 0)
-#if defined(_WIN32)
-        a.mov(x86::rcx, x86::rbp);                     // cpu
-        a.mov(x86::edx, imm(ins));                     // full instruction (helper extracts the IPR index)
-        a.mov(x86::r8, reg(ra));                       // cur: current Ra, returned as-is for an unknown IPR
-#else
-        a.mov(x86::rdi, x86::rbp);                     // cpu
-        a.mov(x86::esi, imm(ins));                     // full instruction (helper extracts the IPR index)
-        a.mov(x86::rdx, reg(ra));                      // cur: current Ra, returned as-is for an unknown IPR
-#endif
-        a.mov(x86::rax, imm((uint64_t) hw_mfpr_helper));
-        a.call(x86::rax);                              // -> RAX = IPR value
+        emit_call(hw_mfpr_helper, { {JA_CPU, 0}, {JA_I32, (uint64_t) ins}, {JA_GP, (uint64_t) ra} });  // -> RAX = IPR value
         a.mov(reg(ra), x86::rax);                      // Ra = value (reg() applies the PALshadow remap)
       }
       continue;
@@ -1030,15 +972,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     // pass's value in verify. Dest is Ra (not Rc); classify gated Ra!=31, so a store always happens.
     if (op == OP_RPCC || op == OP_RC || op == OP_RS) {
       const int sel = (op == OP_RPCC) ? 0 : (op == OP_RC) ? 1 : 2;
-#if defined(_WIN32)
-      a.mov(x86::rcx, x86::rbp);                       // cpu
-      a.mov(x86::edx, imm(sel));                       // selector: 0=RPCC, 1=RC, 2=RS
-#else
-      a.mov(x86::rdi, x86::rbp);                       // cpu
-      a.mov(x86::esi, imm(sel));                       // selector: 0=RPCC, 1=RC, 2=RS
-#endif
-      a.mov(x86::rax, imm((uint64_t) misc_helper));
-      a.call(x86::rax);                                // -> RAX = value (replayed in verify)
+      emit_call(misc_helper, { {JA_CPU, 0}, {JA_I32, (uint64_t) sel} });  // -> RAX = value (replayed in verify)
       a.mov(reg(ra), x86::rax);                        // Ra = value (reg() applies the PALshadow remap)
       continue;
     }
@@ -1046,21 +980,8 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     // ITOFx (0x14): f[Fc] = fmt(Ra). jit_itof mirrors FPSTART (fpen -> FEN trap = bail, exc_sum=0);
     // the verify compares the FP file via its snapshot.
     if (op == OP_ITOFS || op == OP_ITOFF || op == OP_ITOFT) {
-#if defined(_WIN32)
-      a.mov(x86::rcx, x86::rbp);                       // cpu
-      a.mov(x86::edx, imm(rc));                        // Fc (plain index, FREG has no shadow remap)
-      if (ra == 31)  a.xor_(x86::r8d, x86::r8d);       // value (R31 == 0)
-      else           a.mov(x86::r8, reg(ra));
-      a.mov(x86::r9d, imm(op == OP_ITOFS ? 1 : (op == OP_ITOFF) ? 2 : 0));   // fmt: S/F/T
-#else
-      a.mov(x86::rdi, x86::rbp);                       // cpu
-      a.mov(x86::esi, imm(rc));                        // Fc (plain index, FREG has no shadow remap)
-      if (ra == 31)  a.xor_(x86::edx, x86::edx);       // value (R31 == 0)
-      else           a.mov(x86::rdx, reg(ra));
-      a.mov(x86::ecx, imm(op == OP_ITOFS ? 1 : (op == OP_ITOFF) ? 2 : 0));   // fmt: S/F/T
-#endif
-      a.mov(x86::rax, imm((uint64_t) itof_helper));
-      a.call(x86::rax);                                // jit_itof(cpu, fc, value, fmt)
+      emit_call(itof_helper, { {JA_CPU, 0}, {JA_I32, (uint64_t) rc}, {JA_GPZ, (uint64_t) ra},
+                {JA_I32, (uint64_t) (op == OP_ITOFS ? 1 : (op == OP_ITOFF) ? 2 : 0)} });  // jit_itof(cpu, fc, value, fmt)
       Label ok = a.new_label();
       a.test(x86::eax, x86::eax);
       a.jz(ok);
@@ -1074,19 +995,8 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
 
     // FTOIx (0x1c): Rc = fmt(f[Fa]). Same FPSTART bail shape; dest is a GPR (verify-compared).
     if (op == OP_FTOIS || op == OP_FTOIT) {
-#if defined(_WIN32)
-      a.mov(x86::rcx, x86::rbp);                       // cpu
-      a.mov(x86::edx, imm(ra));                        // Fa (the Ra field, plain index)
-      a.mov(x86::r8d, imm(op == OP_FTOIS ? 1 : 0));    // fmt: S/T
-      a.lea(x86::r9, x86::qword_ptr(x86::rsp, 32));    // &out
-#else
-      a.mov(x86::rdi, x86::rbp);                       // cpu
-      a.mov(x86::esi, imm(ra));                        // Fa (the Ra field, plain index)
-      a.mov(x86::edx, imm(op == OP_FTOIS ? 1 : 0));    // fmt: S/T
-      a.lea(x86::rcx, x86::qword_ptr(x86::rsp, 32));   // &out
-#endif
-      a.mov(x86::rax, imm((uint64_t) ftoi_helper));
-      a.call(x86::rax);                                // jit_ftoi(cpu, fa, fmt, &out)
+      emit_call(ftoi_helper, { {JA_CPU, 0}, {JA_I32, (uint64_t) ra},
+                {JA_I32, (uint64_t) (op == OP_FTOIS ? 1 : 0)}, {JA_OUT, 0} });  // jit_ftoi(cpu, fa, fmt, &out)
       Label ok = a.new_label();
       a.test(x86::eax, x86::eax);
       a.jz(ok);
@@ -1136,15 +1046,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
 
     // FLTL non-arithmetic (0x17): all effects in state.f / fpcr via jit_fltl(cpu, ins).
     if (op == OP_FLTL) {
-#if defined(_WIN32)
-      a.mov(x86::rcx, x86::rbp);                       // cpu
-      a.mov(x86::edx, imm(ins));                       // full instruction (helper decodes func/regs)
-#else
-      a.mov(x86::rdi, x86::rbp);                       // cpu
-      a.mov(x86::esi, imm(ins));                       // full instruction (helper decodes func/regs)
-#endif
-      a.mov(x86::rax, imm((uint64_t) fltl_helper));
-      a.call(x86::rax);                                // jit_fltl(cpu, ins)
+      emit_call(fltl_helper, { {JA_CPU, 0}, {JA_I32, (uint64_t) ins} });  // jit_fltl(cpu, ins)
       Label ok = a.new_label();
       a.test(x86::eax, x86::eax);
       a.jz(ok);
@@ -1159,15 +1061,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     // FLTV VAX arith (0x15): jit_fltv runs the op into f[Fc]. Return 0 ok / 1 FPSTART bail (op not run
     // -> set_pc, interp re-runs) / 2 arith trap (op ran + GO_PAL already set state.pc -> return as-is).
     if (op == OP_FLTV) {
-#if defined(_WIN32)
-      a.mov(x86::rcx, x86::rbp);                       // cpu
-      a.mov(x86::edx, imm(ins));                       // full instruction (helper decodes func/regs)
-#else
-      a.mov(x86::rdi, x86::rbp);                       // cpu
-      a.mov(x86::esi, imm(ins));                       // full instruction (helper decodes func/regs)
-#endif
-      a.mov(x86::rax, imm((uint64_t) fltv_helper));
-      a.call(x86::rax);                                // jit_fltv(cpu, ins)
+      emit_call(fltv_helper, { {JA_CPU, 0}, {JA_I32, (uint64_t) ins} });  // jit_fltv(cpu, ins)
       Label ok = a.new_label(), trapped = a.new_label();
       a.test(x86::eax, x86::eax);
       a.jz(ok);                                        // 0: no trap -> continue the block
@@ -1221,15 +1115,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       if (func < 0x40) {                          // privileged: OPCDEC trap if in user mode (cm != 0)
         a.cmp(x86::dword_ptr(x86::rbp, m_off.state_cm), imm(0));
         a.je(do_vector);
-#if defined(_WIN32)
-        a.mov(x86::rcx, x86::rbp);                 // cpu
-        a.mov(x86::rdx, imm(cpc));                 // faulting PC (-> EXC_ADDR)
-#else
-        a.mov(x86::rdi, x86::rbp);                 // cpu
-        a.mov(x86::rsi, imm(cpc));                 // faulting PC (-> EXC_ADDR)
-#endif
-        a.mov(x86::rax, imm((uint64_t) opcdec_helper));
-        a.call(x86::rax);                          // jit_opcdec: sets state.pc/exc_addr, clears lock
+        emit_call(opcdec_helper, { {JA_CPU, 0}, {JA_I64, cpc} });  // jit_opcdec: sets state.pc/exc_addr, clears lock
         a.add(x86::r14d, imm(plen));               // count the block; helper already wrote state.pc
         a.mov(x86::eax, x86::r14d);
         a.jmp(done);                               // trap path exits (does not chain)
@@ -1566,13 +1452,8 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
 #ifndef JIT_VERIFY
     Label exit_chain = a.new_label();
     emit_gate(exit_chain);                                        // budget/interrupt: bail to dispatcher
-#if defined(_WIN32)
-    a.mov(x86::rcx, x86::rbp);                                    // cpu
-    a.mov(x86::rdx, x86::r10);                                    // target PC (== state.pc)
-#else
-    a.mov(x86::rdi, x86::rbp);                                    // cpu
-    a.mov(x86::rsi, x86::r10);                                    // target PC (== state.pc)
-#endif
+    a.mov(aq(0), x86::rbp);                                       // cpu    (arg 0)
+    a.mov(aq(1), x86::r10);                                       // target (arg 1) == state.pc
     a.mov(x86::rax, imm((uint64_t) indirect_helper));
     a.call(x86::rax);                                             // jit_indirect(cpu, target) -> body | 0
     a.test(x86::rax, x86::rax);                              a.jz(exit_chain);
