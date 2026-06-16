@@ -527,6 +527,8 @@ private:
   static int jit_ftoi(CAlphaCPU* cpu, u32 fa, u32 fmt, u64* out);
   // FLTL (0x17) non-arithmetic: FPCR moves, CPYSx, FCMOVx, CVTLQ/QL. Return 1 = FEN-trap bail.
   static int jit_fltl(CAlphaCPU* cpu, u32 ins);
+  // FLTV (0x15) VAX arith/convert/compare. Return 0 ok / 1 FEN-trap bail / 2 arith trap (exc_sum set).
+  static int jit_fltv(CAlphaCPU* cpu, u32 ins);
   // Verify support: the interpreter pass records each value it loads, and the
   // compiled pass replays them instead of re-reading memory - false mismatch fix
   bool m_jit_vreplay = false;  // compiled pass: replay recorded loads, don't re-read

@@ -21,6 +21,7 @@ enum SafeOp {
   OP_FTOIS, OP_FTOIT,                            // FPTI (0x1c) FP->int reg moves: Rc = fmt(f[Fa])
   OP_FLTL,                                       // FLTL (0x17) non-arithmetic: FPCR moves, CPYSx, FCMOVx, CVTLQ/QL
   OP_CVTQT, OP_CVTQS,                            // FLTI (0x16) int->IEEE convert: f[Fc] = (T/S)(s64)f[Fb] via SSE
+  OP_FLTV,                                       // FLTV (0x15) VAX arith/convert/compare: f[Fc] via jit_fltv helper
   OP_AND, OP_BIS, OP_XOR, OP_BIC, OP_ORNOT, OP_EQV,
   OP_CMOV,                       // INTL (0x11) conditional moves CMOVxx: Rc = cond(Ra) ? op2 : Rc
   OP_AMASK, OP_IMPLVER,          // INTL (0x11) CPU feature probes: Rc = op2 & ~CPU_AMASK / Rc = CPU_IMPLVER
@@ -141,6 +142,21 @@ SafeOp classify(uint32_t ins, bool pal_block)
       if (f17 == 0x025)      { if (((ins >> 21) & 0x1f) == 31) return OP_NONE; }
       else if (f17 != 0x024) { if ((ins & 0x1f) == 31) return OP_NONE; }
       return OP_FLTL;
+    }
+    case 0x15: { // FLTV (VAX): helper-dispatched arith/convert/compare; bail to the interp on trap.
+      if ((ins & 0x1f) == 31) return OP_NONE;       // Fc==31: interp zeroes f[31] per instr
+      const uint32_t f = (ins >> 5) & 0x7ff;
+      if (f == 0x0a5 || f == 0x4a5 || f == 0x0a6 || f == 0x4a6 || f == 0x0a7 || f == 0x4a7   // CMPGEQ/LT/LE
+       || f == 0x03c || f == 0x0bc || f == 0x03e || f == 0x0be) return OP_FLTV;              // CVTQF/CVTQG
+      if (f & 0x200) return OP_NONE;                 // invalid qualifier -> interp OPCDECs (UNKNOWN2)
+      switch (f & 0x7f) {                            // base-op arith / G<->F<->D / G->Q convert
+        case 0x000: case 0x001: case 0x002: case 0x003:   // ADDF/SUBF/MULF/DIVF
+        case 0x01e:                                       // CVTDG
+        case 0x020: case 0x021: case 0x022: case 0x023:   // ADDG/SUBG/MULG/DIVG
+        case 0x02c: case 0x02d: case 0x02f:               // CVTGF/CVTGD/CVTGQ
+          return OP_FLTV;
+      }
+      return OP_NONE;                                // other 0x15 funcs: interp OPCDECs
     }
     case 0x16: { // FLTI (IEEE): SSE-inline the int->float converts; bail to the interp on traps/edges.
       const uint32_t f = (ins >> 5) & 0x7ff;
@@ -432,7 +448,7 @@ static const bool g_zapnot_init = [] {
   return true;
 }();
 
-void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper, void* hw_ld_helper, void* hw_mtpr_helper, void* hw_st_helper, void* indirect_helper, void* read_locked_helper, void* stc_helper, void* misc_helper, void* read_vpte_helper, void* itof_helper, void* ftoi_helper, void* fltl_helper, void* fp_read_helper, void* fp_write_helper)
+void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper, void* hw_ld_helper, void* hw_mtpr_helper, void* hw_st_helper, void* indirect_helper, void* read_locked_helper, void* stc_helper, void* misc_helper, void* read_vpte_helper, void* itof_helper, void* ftoi_helper, void* fltl_helper, void* fp_read_helper, void* fp_write_helper, void* fltv_helper)
 {
   using namespace asmjit;
   // Reclaim must self-trigger here, NOT only in flush(): flush() runs when the guest executes
@@ -1134,6 +1150,35 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       a.jz(ok);
       set_pc(b->tag + 4 * (uint64_t) i);               // FEN trap: resume here in the interpreter
       a.mov(x86::eax, imm(i));
+      a.add(x86::eax, x86::r14d);
+      a.jmp(done);
+      a.bind(ok);
+      continue;
+    }
+
+    // FLTV VAX arith (0x15): jit_fltv runs the op into f[Fc]. Return 0 ok / 1 FPSTART bail (op not run
+    // -> set_pc, interp re-runs) / 2 arith trap (op ran + GO_PAL already set state.pc -> return as-is).
+    if (op == OP_FLTV) {
+#if defined(_WIN32)
+      a.mov(x86::rcx, x86::rbp);                       // cpu
+      a.mov(x86::edx, imm(ins));                       // full instruction (helper decodes func/regs)
+#else
+      a.mov(x86::rdi, x86::rbp);                       // cpu
+      a.mov(x86::esi, imm(ins));                       // full instruction (helper decodes func/regs)
+#endif
+      a.mov(x86::rax, imm((uint64_t) fltv_helper));
+      a.call(x86::rax);                                // jit_fltv(cpu, ins)
+      Label ok = a.new_label(), trapped = a.new_label();
+      a.test(x86::eax, x86::eax);
+      a.jz(ok);                                        // 0: no trap -> continue the block
+      a.cmp(x86::eax, imm(2));
+      a.je(trapped);                                   // 2: arith trap -- GO_PAL already set state.pc
+      set_pc(b->tag + 4 * (uint64_t) i);               // 1: FEN trap (op not run) -> resume this instr
+      a.mov(x86::eax, imm(i));
+      a.add(x86::eax, x86::r14d);
+      a.jmp(done);
+      a.bind(trapped);                                 // op ran then diverted: count it, keep state.pc
+      a.mov(x86::eax, imm(i + 1));
       a.add(x86::eax, x86::r14d);
       a.jmp(done);
       a.bind(ok);

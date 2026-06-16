@@ -91,7 +91,7 @@ public:
   JitBlock* revalidate_flushed(uint64_t virt_pc, uint32_t asn, uint64_t phys_pc, const uint8_t* dram);
 
   JitBlock* record(uint64_t virt_pc, uint64_t phys_pc, uint32_t asn, bool asm_global, uint32_t n_instr, const uint8_t* dram);
-  void compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper, void* hw_ld_helper, void* hw_mtpr_helper, void* hw_st_helper, void* indirect_helper, void* read_locked_helper, void* stc_helper, void* misc_helper, void* read_vpte_helper, void* itof_helper, void* ftoi_helper, void* fltl_helper, void* fp_read_helper, void* fp_write_helper);
+  void compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper, void* hw_ld_helper, void* hw_mtpr_helper, void* hw_st_helper, void* indirect_helper, void* read_locked_helper, void* stc_helper, void* misc_helper, void* read_vpte_helper, void* itof_helper, void* ftoi_helper, void* fltl_helper, void* fp_read_helper, void* fp_write_helper, void* fltv_helper);
   void flush();
   void flush_non_global();   // flush only !asm_global blocks (the ASM-bit-clear / ASN icache flush)
   void reclaim_code();       // free ALL compiled code once past kReclaimBytes (cold-path only)

@@ -1087,7 +1087,8 @@ void CAlphaCPU::jit_run(int budget)
 				                     (void*) &CAlphaCPU::jit_misc, (void*) &CAlphaCPU::jit_read_vpte,
 				                     (void*) &CAlphaCPU::jit_itof, (void*) &CAlphaCPU::jit_ftoi,
 				                     (void*) &CAlphaCPU::jit_fltl,
-				                     (void*) &CAlphaCPU::jit_fp_read, (void*) &CAlphaCPU::jit_fp_write);
+				                     (void*) &CAlphaCPU::jit_fp_read, (void*) &CAlphaCPU::jit_fp_write,
+				                     (void*) &CAlphaCPU::jit_fltv);
 		}
 	}
 }
@@ -1286,6 +1287,45 @@ int CAlphaCPU::jit_fltl(CAlphaCPU* cpu, u32 ins)
 		break;
 	}
 	return 0;
+}
+
+// JIT VAX-FP arithmetic helper (static). FLTV (0x15): mirrors the interpreter's vax_* dispatch into
+// f[fc]. FPSTART bail (return 1) if FP disabled. Returns 2 when the op delivered an arith trap: vax_trap
+// GO_PALs (sets state.pc + exc_sum), so exc_sum != 0 detects it and the caller honors state.pc -- the op
+// runs exactly once (no re-execute). Returns 0 on the common no-trap path. Fc==31 is gated out in classify.
+int CAlphaCPU::jit_fltv(CAlphaCPU* cpu, u32 ins)
+{
+	if (cpu->state.fpen == 0) return 1;       // FEN trap (FPSTART): op not run
+	cpu->state.exc_sum = 0;
+	u64* f = cpu->state.f;
+	const u32 fa = (ins >> 21) & 0x1f, fb = (ins >> 16) & 0x1f, fc = ins & 0x1f;
+	const u32 fn = (ins >> 5) & 0x7ff;
+	UFP u;
+	switch (fn)
+	{
+	case 0x0a5: case 0x4a5: f[fc] = (cpu->vax_fcmp(f[fa], f[fb], ins) == 0) ? U64(0x4000000000000000) : 0; break;   // CMPGEQ
+	case 0x0a6: case 0x4a6: f[fc] = (cpu->vax_fcmp(f[fa], f[fb], ins) <  0) ? U64(0x4000000000000000) : 0; break;   // CMPGLT
+	case 0x0a7: case 0x4a7: f[fc] = (cpu->vax_fcmp(f[fa], f[fb], ins) <= 0) ? U64(0x4000000000000000) : 0; break;   // CMPGLE
+	case 0x03c: case 0x0bc: f[fc] = cpu->vax_cvtif(f[fb], ins, DT_F); break;   // CVTQF
+	case 0x03e: case 0x0be: f[fc] = cpu->vax_cvtif(f[fb], ins, DT_G); break;   // CVTQG
+	default:
+		switch (fn & 0x7f)
+		{
+		case 0x000: f[fc] = cpu->vax_fadd(f[fa], f[fb], ins, DT_F, false); break;   // ADDF
+		case 0x001: f[fc] = cpu->vax_fadd(f[fa], f[fb], ins, DT_F, true);  break;   // SUBF
+		case 0x002: f[fc] = cpu->vax_fmul(f[fa], f[fb], ins, DT_F);        break;   // MULF
+		case 0x003: f[fc] = cpu->vax_fdiv(f[fa], f[fb], ins, DT_F);        break;   // DIVF
+		case 0x01e: cpu->vax_unpack_d(f[fb], &u, ins); f[fc] = cpu->vax_rpack(&u, ins, DT_G); break;   // CVTDG
+		case 0x020: f[fc] = cpu->vax_fadd(f[fa], f[fb], ins, DT_G, false); break;   // ADDG
+		case 0x021: f[fc] = cpu->vax_fadd(f[fa], f[fb], ins, DT_G, true);  break;   // SUBG
+		case 0x022: f[fc] = cpu->vax_fmul(f[fa], f[fb], ins, DT_G);        break;   // MULG
+		case 0x023: f[fc] = cpu->vax_fdiv(f[fa], f[fb], ins, DT_G);        break;   // DIVG
+		case 0x02c: cpu->vax_unpack(f[fb], &u, ins); f[fc] = cpu->vax_rpack(&u, ins, DT_F); break;   // CVTGF
+		case 0x02d: cpu->vax_unpack(f[fb], &u, ins); f[fc] = cpu->vax_rpack_d(&u, ins);     break;   // CVTGD
+		case 0x02f: f[fc] = cpu->vax_cvtfi(f[fb], ins); break;   // CVTGQ
+		}
+	}
+	return cpu->state.exc_sum ? 2 : 0;   // exc_sum != 0 => vax_trap GO_PAL'd -> caller honors state.pc
 }
 
 // JIT load-locked helper (static). LDx_L: the verify-checked load PLUS cpu_lock -- the LL/SC
