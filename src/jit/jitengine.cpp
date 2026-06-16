@@ -38,6 +38,7 @@ enum SafeOp {
   OP_STB, OP_STW,                // BWX byte/word stores (0x0e/0x0d): MEM[Rb + disp16].{b,w} = Ra
   OP_LDQ_U, OP_STQ_U,            // unaligned quad (0x0b/0x0f): MEM[(Rb+disp16) & ~7] load/store
   OP_LDT, OP_LDS, OP_STT, OP_STS, // FP memory (0x23/0x22/0x27/0x26): f[Fa] <-> MEM, LDT/STT raw, LDS/STS ieee conv
+  OP_LDF, OP_LDG, OP_STF, OP_STG, // VAX FP memory (0x20/0x21/0x24/0x25): f[Fa] <-> MEM, F/G format conversion (helper)
   OP_LDA, OP_LDAH,               // load-address: Ra = Rb + disp16 (<<16 for LDAH); pure ALU
   OP_HW_MFPR,                    // HW_MFPR (0x19), PALmode only: Ra = IPR[(ins>>8)&0xff] via helper
   OP_HW_LDL, OP_HW_LDQ,          // HW_LD (0x1b) physical func 0/1, PALmode only: Ra = phys[Rb+disp12]
@@ -261,6 +262,10 @@ SafeOp classify(uint32_t ins, bool pal_block)
     case 0x22: return OP_LDS;   //                                    LDS ieee_lds(4B)
     case 0x27: return OP_STT;   // FP stores (MEM[Rb+disp16] = f[Fa]): STT raw 8B
     case 0x26: return OP_STS;   //                                     STS ieee_sts(4B)
+    case 0x20: return OP_LDF;   // VAX FP loads:  LDF vax_ldf(4B)
+    case 0x21: return OP_LDG;   //                LDG vax_ldg(8B)
+    case 0x24: return OP_STF;   // VAX FP stores: STF vax_stf(4B)
+    case 0x25: return OP_STG;   //                STG vax_stg(8B)
     case 0x2e:                  // STL_C / STQ_C: the store-conditional half of LL/SC. Ra is both the
     case 0x2f:                  // value AND the success/fail dest. Compile Ra!=31 (Ra==31 discards the
       // result into R31, so the verify can't capture it from a GPR); interpret those.
@@ -723,16 +728,20 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       continue;
     }
 
-    // FP memory (LDS/LDT/STS/STT): f[Fa] <-> MEM[Rb+disp16] with FPSTART (fpen gate + exc_sum=0).
-    // LDT/STT are raw 8B -> inline fast path; LDS/STS need ieee_lds/sts -> helper. Verify uses the
+    // FP memory (LDS/LDT/STS/STT + VAX LDF/LDG/STF/STG): f[Fa] <-> MEM[Rb+disp16] with FPSTART.
+    // LDT/STT are raw 8B -> inline fast path; the converting forms (S/F/G) go through the helper. Verify uses the
     // helper only (FP loads replay the logged f-value, FP stores compare via jit_write's store-log).
-    if (op == OP_LDT || op == OP_LDS || op == OP_STT || op == OP_STS) {
-      const bool isload = (op == OP_LDT || op == OP_LDS);
+    if (op == OP_LDT || op == OP_LDS || op == OP_STT || op == OP_STS ||
+        op == OP_LDF || op == OP_LDG || op == OP_STF || op == OP_STG) {
+      const bool isload = (op == OP_LDT || op == OP_LDS || op == OP_LDF || op == OP_LDG);
       const bool israw  = (op == OP_LDT || op == OP_STT);   // T-format: no conversion -> inline-able
       const int  fa     = ra;                               // Fa = (ins>>21)&0x1f (FP regs: no shadow remap)
-      const int  size_bits = israw ? 64 : 32;
+      // fmt: 0=T raw, 1=S ieee, 2=F vax, 3=G vax. S/F are 32-bit in memory; T/G are 64-bit.
+      const uint32_t fmt  = (op == OP_LDS || op == OP_STS) ? 1u : (op == OP_LDF || op == OP_STF) ? 2u
+                          : (op == OP_LDG || op == OP_STG) ? 3u : 0u;
+      const int  size_bits = (fmt == 1 || fmt == 2) ? 32 : 64;
       const int  disp   = (int) (int16_t) (ins & 0xFFFF);
-      const uint32_t descr = (israw ? 0u : (1u << 16)) | (uint32_t) size_bits;   // fmt(1=S)<<16 | size
+      const uint32_t descr = (fmt << 16) | (uint32_t) size_bits;   // fmt<<16 | size
 
       if (isload && fa == 31) continue;   // LDT/LDS f31: interp skips the read (NOP)
 

@@ -862,7 +862,7 @@ void CAlphaCPU::jit_run(int budget)
 				const u32  miscfn    = (ins & 0xFFFF);
 				const bool is_miscrd = (opc == 0x18) && (miscfn == 0xC000 || miscfn == 0xE000 || miscfn == 0xF000);
 				const bool is_isum   = (opc == 0x19) && (((ins >> 8) & 0xff) == 0x0d);   // ISUM: async interrupt-summary
-				const bool is_fpld   = (opc == 0x22 || opc == 0x23);   // LDS/LDT: dest is f[lra], not a GPR
+				const bool is_fpld   = (opc == 0x22 || opc == 0x23 || opc == 0x20 || opc == 0x21);   // LDS/LDT/LDF/LDG: dest is f[lra]
 				const bool isld = (opc == 0x28 || opc == 0x29 || opc == 0x0a || opc == 0x0c
 				                   || opc == 0x2a || opc == 0x2b || opc == 0x0b || is_hwld || is_miscrd || is_isum || is_fpld) && lra != 31;  // +LDBU/LDWU +LDx_L +LDQ_U +RPCC/RC/RS +ISUM +LDS/LDT
 				u64 eva = 0;
@@ -879,7 +879,7 @@ void CAlphaCPU::jit_run(int budget)
 				// 0/1) stores too, with a physical (untranslated) address and a 12-bit disp.
 				const bool is_sc   = (opc == 0x2e || opc == 0x2f);   // STL_C/STQ_C: store-conditional (success in Ra)
 				const bool is_hwst = (opc == 0x1f) && (((ins >> 12) & 0xf) <= 1);
-				const bool is_fpst = (opc == 0x26 || opc == 0x27);   // STS/STT: value source is f[lra]
+				const bool is_fpst = (opc == 0x26 || opc == 0x27 || opc == 0x24 || opc == 0x25);   // STS/STT/STF/STG: value source is f[lra]
 				const bool isst = (opc == 0x2c || opc == 0x2d || opc == 0x0d || opc == 0x0e || opc == 0x0f || is_sc || is_hwst || is_fpst);  // +STx_C +STQ_U +STS/STT
 				u64 sva = 0, sval = 0;
 				if (isst)
@@ -889,7 +889,8 @@ void CAlphaCPU::jit_run(int budget)
 					                          : (int) (int16_t) (ins & 0xFFFF);        // STx:   16-bit
 					sva  = (srb == 31 ? (u64) 0 : state.r[RREG(srb)]) + (u64) sdisp;
 					if (opc == 0x0f) sva &= ~U64(7);   // STQ_U: address forced to 8-byte alignment
-					if (is_fpst) sval = (opc == 0x27) ? state.f[lra] : (u64) ieee_sts(state.f[lra]);   // STT raw / STS conv
+					if (is_fpst) sval = (opc == 0x27) ? state.f[lra] : (opc == 0x26) ? (u64) ieee_sts(state.f[lra])
+					                  : (opc == 0x24) ? (u64) vax_stf(state.f[lra]) : vax_stg(state.f[lra]);   // STT/STS/STF/STG
 					else         sval = (lra == 31 ? (u64) 0 : state.r[RREG(lra)]);
 				}
 				// Computed jump (JMP/JSR/RET): target = Rb & ~3, taken before execute() (the
@@ -1177,7 +1178,13 @@ int CAlphaCPU::jit_fp_read(CAlphaCPU* cpu, u64 va, u32 fa, u32 descr)
 	}
 	u64 raw;
 	if (jit_read(cpu, va, (int) (descr & 0xffff), &raw)) return 1;   // production cache read
-	cpu->state.f[fa] = (descr >> 16) ? cpu->ieee_lds((u32) raw) : raw;   // LDS conv / LDT raw
+	switch (descr >> 16)   // fmt: 0=T raw, 1=S ieee, 2=F vax, 3=G vax
+	{
+	case 1:  cpu->state.f[fa] = cpu->ieee_lds((u32) raw); break;   // LDS
+	case 2:  cpu->state.f[fa] = cpu->vax_ldf((u32) raw); break;    // LDF
+	case 3:  cpu->state.f[fa] = cpu->vax_ldg(raw);       break;    // LDG
+	default: cpu->state.f[fa] = raw;                     break;    // LDT raw
+	}
 	return 0;
 }
 
@@ -1187,7 +1194,14 @@ int CAlphaCPU::jit_fp_write(CAlphaCPU* cpu, u64 va, u32 fa, u32 descr)
 {
 	if (cpu->state.fpen == 0) return 1;       // FEN trap (FPSTART)
 	cpu->state.exc_sum = 0;
-	const u64 value = (descr >> 16) ? (u64) cpu->ieee_sts(cpu->state.f[fa]) : cpu->state.f[fa];
+	u64 value;
+	switch (descr >> 16)   // fmt: 0=T raw, 1=S ieee, 2=F vax, 3=G vax
+	{
+	case 1:  value = (u64) cpu->ieee_sts(cpu->state.f[fa]); break;   // STS
+	case 2:  value = (u64) cpu->vax_stf(cpu->state.f[fa]); break;    // STF
+	case 3:  value = cpu->vax_stg(cpu->state.f[fa]);       break;    // STG
+	default: value = cpu->state.f[fa];                     break;    // STT raw
+	}
 	return jit_write(cpu, va, (int) (descr & 0xffff), value);
 }
 
