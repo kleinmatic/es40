@@ -19,6 +19,23 @@
 
 namespace {
 
+#ifdef JIT_DISASM
+// Log/error any asmjit emit failure (badly formed instruction / bad operand) that the Assembler
+// would otherwise accept and then ship as a silently truncated block. Records the failure so
+// compile_block discards the block instead of adding it.
+class JitErrorHandler : public asmjit::ErrorHandler {
+public:
+  FILE* fp = nullptr;   // disassembly trace file (falls back to stderr if unopened)
+  int   cpu_id = -1;
+  bool  failed = false;
+  void handle_error(asmjit::Error err, const char* message, asmjit::BaseEmitter*) override {
+    (void) err;
+    failed = true;
+    fprintf(fp ? fp : stderr, "[JIT][CPU%d][EMIT-ERROR] %s\n", cpu_id, message);
+  }
+};
+#endif
+
 enum SafeOp {
   OP_NONE,
   OP_ADDQ, OP_SUBQ, OP_ADDL, OP_SUBL,
@@ -331,11 +348,21 @@ CJitEngine::CJitEngine(int cpu_id) : m_cpu_id(cpu_id), m_recorded(0), m_code_byt
   memset(m_hwld_func, 0, sizeof(m_hwld_func));
   m_first_breaker_logged = false;
 #endif
+#ifdef JIT_DISASM
+  char name[64];
+  snprintf(name, sizeof name, "jit_disasm_cpu%d.txt", m_cpu_id);
+  m_disasm_fp = fopen(name, "w");
+  if (!m_disasm_fp)
+    fprintf(stderr, "[JIT][CPU%d] could not open %s for the disassembly trace\n", m_cpu_id, name);
+#endif
 }
 
 CJitEngine::~CJitEngine()
 {
   delete (asmjit::JitRuntime*) m_rt;
+#ifdef JIT_DISASM
+  if (m_disasm_fp) fclose(m_disasm_fp);
+#endif
 }
 
 // FNV-1a/64 over a block's source words -- record() uses it to revalidate kept code after a flush
@@ -533,11 +560,22 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   // for calls. RAX = op1/result, RCX = operand2 (CL for variable shifts).
   CodeHolder code;
   if (code.init(((JitRuntime*) m_rt)->environment()) != Error::kOk) return;
+#ifdef JIT_DISASM
+  // Dev: capture this block's disassembly, validate each emitted instruction, and trap any
+  // emit failure (dumped + bailed near rt->add() below). Logging formats every instruction.
+  StringLogger logger;
+  code.set_logger(&logger);
+  JitErrorHandler eh; eh.cpu_id = m_cpu_id; eh.fp = m_disasm_fp;
+  code.set_error_handler(&eh);
+#endif
   x86::Assembler a(&code);
+#ifdef JIT_DISASM
+  a.add_diagnostic_options(DiagnosticOptions::kValidateAssembler);
+#endif
 
   // Host integer-argument registers:
   // Win64 {rcx,rdx,r8,r9}; System V {rdi,rsi,rdx,rcx}. aq(i)/ad(i) = the i argument as a
-  // 64-/32-bit register; e mit_call (below) marshals into them, replacing out usage of 
+  // 64-/32-bit register; emit_call (below) marshals into them, replacing out usage of 
   // #ifdef _WIN32. Helpers limited to <= 4 integer arguments.
   CallConv cc;
   (void) cc.init(CallConvId::kCDecl, ((JitRuntime*) m_rt)->environment());
@@ -1495,6 +1533,16 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
 
   const size_t csz = code.code_size();
   JitFn fn = nullptr;
+#ifdef JIT_DISASM
+  {
+    FILE* out = m_disasm_fp ? m_disasm_fp : stderr;
+    fprintf(out, "[JIT][CPU%d] block @ %016llx%s  (%u instr, %llu bytes)\n%s\n",
+            m_cpu_id, (unsigned long long) (b->tag & ~(uint64_t) 1),
+            (b->tag & 1) ? " PAL" : "", plen, (unsigned long long) csz, logger.data());
+    fflush(out);   // per-block flush: preserve the trace if JIT'd code later crashes
+  }
+  if (eh.failed) return;   // emit error already reported -- don't ship a broken block
+#endif
   if (((JitRuntime*) m_rt)->add(&fn, &code) != Error::kOk) return;
   b->code = fn;
   b->jit_body = (void*) ((uint8_t*) (void*) fn + body_off);   // chained re-entry (past prologue)

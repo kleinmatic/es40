@@ -14,6 +14,9 @@
 
 #include <cstdint>
 #include "../config_debug.h"   // JIT_VERIFY
+#ifdef JIT_DISASM
+#include <cstdio>              // FILE* for the per-CPU disassembly trace
+#endif
 
 class CAlphaCPU;   // compiled blocks call back into the CPU for memory accesses
 
@@ -122,6 +125,9 @@ private:
   uint64_t m_code_bytes;  // compiled bytes since last reclaim (see flush())
   void*    m_rt;          // asmjit::JitRuntime*
   JitOffsets m_off = {};  // field offsets for the inline load fast path
+#ifdef JIT_DISASM
+  FILE*    m_disasm_fp = nullptr;   // per-CPU disassembly trace file (jit_disasm_cpuN.txt)
+#endif
 #ifdef JIT_VERIFY
   uint64_t m_v_exec, m_v_fail;
 #endif

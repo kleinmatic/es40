@@ -179,3 +179,8 @@
 // Define to print compiled-native vs interpreted instruction coverage periodically
 // (ES40_JIT builds only). Measure with JIT_VERIFY off.
 //#define JIT_STATS
+
+// Define to dump each compiled block's emitted x86-64 disassembly,
+// validate every emitted instruction, and trap silent emit failures via an error handler.
+// VERY NOISY, and validation adds runtime cost (ES40_JIT builds only).
+//#define JIT_DISASM
