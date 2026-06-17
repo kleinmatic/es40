@@ -113,7 +113,9 @@ public:
 
 #ifdef JIT_STATS
   // Accumulate native vs interpreted instruction counts; prints coverage periodically.
-  void note_exec(uint32_t native_instr, uint32_t interp_instr);
+  // Returns the wall-clock ns spent in this call's stats-print I/O (0 when it doesn't report),
+  // so the dispatcher can exclude that stall from the wall-clock-pinned RPCC.
+  uint64_t note_exec(uint32_t native_instr, uint32_t interp_instr);
 #endif
 
 private:

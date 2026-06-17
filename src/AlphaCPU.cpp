@@ -1049,7 +1049,7 @@ void CAlphaCPU::jit_run(int budget)
 			cc_large += (u64) done * cc_per_instruction;
 			budget -= done;
 #ifdef JIT_STATS
-			m_jit->note_exec(done, 0);
+			cc_last_sync += std::chrono::nanoseconds(m_jit->note_exec(done, 0));   // don't bill the stats-print stall to the wall-clock RPCC
 #endif
 			if (done > 0) continue;   // progress made; done==0 (faulting first insn) falls through
 #endif
@@ -1071,7 +1071,7 @@ void CAlphaCPU::jit_run(int budget)
 				break;
 		}
 #ifdef JIT_STATS
-		m_jit->note_exec(0, n);
+		cc_last_sync += std::chrono::nanoseconds(m_jit->note_exec(0, n));   // don't bill the stats-print stall to the wall-clock RPCC
 #endif
 		// Record only translatable block starts (a translation miss left have_phys false).
 		if (have_phys && state.pc != expected)

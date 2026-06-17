@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <chrono>   // note_exec times its own stats-print I/O (excluded from the wall-clock RPCC)
 #include <initializer_list>
 #define ASMJIT_STATIC
 #include <asmjit/x86.h>
@@ -1650,15 +1651,18 @@ static const char* opcode_name(unsigned op)
   }
 }
 
-void CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr)
+uint64_t CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr)
 {
   m_stat_native += native_instr;
   m_stat_interp += interp_instr;
   if (native_instr) m_stat_hot++;     // one compiled-chain dispatch
   if (interp_instr) m_stat_miss++;    // one interpreted (cold/uncompilable) block
   const uint64_t total = m_stat_native + m_stat_interp;
-  if (total < 100000000) return;      // report every 100M instructions
+  if (total < 100000000) return 0;    // report every 100M instructions
 
+  // Time this report's own blocking I/O so the caller can exclude it from the wall-clock-pinned
+  // RPCC -- else the printf stall is billed to the guest cycle counter as a forward jump.
+  const auto stat_t0 = std::chrono::steady_clock::now();
   // Build each line in a buffer and print it with ONE call: 4 CPU threads print concurrently,
   // and per-item printf loops interleave mid-line. The [CPU%d] tag attributes each line.
   const double chain = m_stat_hot ? (double) m_stat_native / (double) m_stat_hot : 0.0;
@@ -1721,6 +1725,8 @@ void CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr)
     printf("%s\n", buf);
   }
   m_stat_native = m_stat_interp = m_stat_hot = m_stat_miss = 0;   // reset the window
+  return (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
+           std::chrono::steady_clock::now() - stat_t0).count();
 }
 #endif
 
