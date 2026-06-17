@@ -948,8 +948,10 @@ u64 CAlphaCPU::ieee_rpack(UFP* r, u32 ins, u32 dp)
 
 	res = (((u64)r->sign) << FPR_V_SIGN) |           /* form result */
 		(((u64)r->exp) << FPR_V_EXP) | ((r->frac >> FPR_GUARD) & FPR_FRAC);
-	if ((rndm == I_FRND_N) && (rndbits == stdrnd[dp])) /* nearest and halfway? */
-		res = res & ~1;  /* clear lo bit */
+	if ((rndm == I_FRND_N) && (rndbits == stdrnd[dp])) /* halfway -> round to even (S LSB=bit29, T LSB=bit0) */
+		res &= ~(dp == DT_S ? U64(0x0000000020000000) : U64(1));
+	if (dp == DT_S)                                    /* S_floating canonical: fraction <28:0> zero (ARM Fig 2-12) */
+		res &= ~U64(0x000000001FFFFFFF);
 	return res;
 }
 
