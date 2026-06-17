@@ -51,6 +51,9 @@ enum SafeOp {
   OP_CVTQT, OP_CVTQS,                            // FLTI (0x16) int->IEEE convert: f[Fc] = (T/S)(s64)f[Fb] via SSE
   OP_ADDT, OP_SUBT, OP_MULT, OP_DIVT,            // FLTI (0x16) IEEE T-float arith: f[Fc] = f[Fa] op f[Fb] via SSE
   OP_CMPTUN, OP_CMPTEQ, OP_CMPTLT, OP_CMPTLE,    // FLTI (0x16) IEEE T-float compares: f[Fc] = (cmp) ? 2.0 : 0.0
+  OP_ADDS, OP_SUBS, OP_MULS, OP_DIVS,            // FLTI (0x16) IEEE S-float arith: f[Fc] = round_single(f[Fa] op f[Fb])
+  OP_CVTST, OP_CVTTS, OP_CVTTQ,                  // FLTI (0x16) IEEE converts: S->T widen, T->S narrow, T->Q to int
+  OP_SQRTS, OP_SQRTT,                            // ITFP (0x14) IEEE sqrt: f[Fc] = sqrt(f[Fb]) via sqrtss/sqrtsd
   OP_FLTV,                                       // FLTV (0x15) VAX arith/convert/compare: f[Fc] via jit_fltv helper
   OP_AND, OP_BIS, OP_XOR, OP_BIC, OP_ORNOT, OP_EQV,
   OP_CMOV,                       // INTL (0x11) conditional moves CMOVxx: Rc = cond(Ra) ? op2 : Rc
@@ -152,11 +155,18 @@ SafeOp classify(uint32_t ins, bool pal_block)
       if (func == 0x00) return OP_MULL;    // 32-bit multiply, low 32 sign-extended
       if (func == 0x30) return OP_UMULH;   // high 64 bits of the unsigned 128-bit product
       break;
-    case 0x14: {  // ITFP: compile the int->FP register moves; SQRT* (FP math: FPCR/rounding/traps)
-      // stays interpreted. Rb must be 31 (else the interp traps OPCDEC); Fc==31 is interpreted
+    case 0x14: {  // ITFP: compile the int->FP register moves + IEEE SQRT*. Fc==31 is interpreted
       // (the interp zeroes f[31] per instruction -- a compiled write would desync).
       const uint32_t f14 = (ins >> 5) & 0x7ff;
-      if (((ins >> 16) & 0x1f) != 31 || (ins & 0x1f) == 31) return OP_NONE;
+      if ((ins & 0x1f) == 31) return OP_NONE;             // Fc==31 -> interp
+      const uint32_t sb = f14 & 0x3f;                     // IEEE sqrt (source Fb): SQRTS 0x0b / SQRTT 0x2b
+      if (sb == 0x0b || sb == 0x2b) {
+        const uint32_t r = (f14 >> 6) & 3;
+        if (r == 0 || r == 1) return OP_NONE;             // /C, /M: SSE rounds nearest -> interpret
+        if (((f14 >> 8) & 7) == 7) return OP_NONE;        // /SUI -> interpret
+        return (sb == 0x2b) ? OP_SQRTT : OP_SQRTS;
+      }
+      if (((ins >> 16) & 0x1f) != 31) return OP_NONE;     // ITOFx: Rb must be 31 (Ra is the int source)
       if (f14 == 0x004) return OP_ITOFS;
       if (f14 == 0x014) return OP_ITOFF;
       if (f14 == 0x024) return OP_ITOFT;
@@ -190,23 +200,36 @@ SafeOp classify(uint32_t ins, bool pal_block)
     }
     case 0x16: { // FLTI (IEEE): SSE-inline the int->float converts; bail to the interp on traps/edges.
       const uint32_t f = (ins >> 5) & 0x7ff;
+      if ((ins & 0x1f) == 31) return OP_NONE;       // Fc==31: interp zeroes f[31] per instr (all 0x16)
+      if (f == 0x2ac || f == 0x6ac) return OP_CVTST;  // CVTST (S->T): before the invalid gate (SRC bit set);
+                                                      // S-denormal renormalizes / NaN quiets -> bail, else valid-T copy
+      if ((f & 0x3f) == 0x2f) {                       // CVTTQ (T->Q int): /C chop is valid -> handle before round gate
+        if (((f >> 6) & 3) == 1) return OP_NONE;      // /M -> interp
+        if (((f >> 8) & 7) == 7) return OP_NONE;      // /SUI -> interp
+        if (((f & 0x600) == 0x200) || ((f & 0x500) == 0x400)) return OP_NONE;  // invalid qualifier
+        return OP_CVTTQ;
+      }
       if (((f & 0x600) == 0x200) || ((f & 0x500) == 0x400)) return OP_NONE;  // invalid qualifier -> OPCDEC
       const uint32_t rnd = (f >> 6) & 3;            // 0=/C 1=/M 2=/N 3=/D (dynamic, runtime-checked)
       if (rnd == 0 || rnd == 1) return OP_NONE;     // chopped / minus-inf: SSE rounds to nearest -> interpret
       if (((f >> 8) & 7) == 7) return OP_NONE;      // /SUI: traps on every inexact -> interpret
-      if ((ins & 0x1f) == 31) return OP_NONE;       // Fc==31: interp zeroes f[31] per instr
       if (f == 0x0a4 || f == 0x5a4) return OP_CMPTUN;   // IEEE compares (None + /SU): f[Fc] = (cmp) ? 2.0 : 0.0
       if (f == 0x0a5 || f == 0x5a5) return OP_CMPTEQ;   // full-function; a NaN operand bails to the interp
       if (f == 0x0a6 || f == 0x5a6) return OP_CMPTLT;
       if (f == 0x0a7 || f == 0x5a7) return OP_CMPTLE;
       const uint32_t baseop = f & 0x3f;
+      if (baseop == 0x00) return OP_ADDS;          // ADDS \  IEEE S-float (single) arith via SSE
+      if (baseop == 0x01) return OP_SUBS;          // SUBS  >
+      if (baseop == 0x02) return OP_MULS;          // MULS  |
+      if (baseop == 0x03) return OP_DIVS;          // DIVS /
       if (baseop == 0x20) return OP_ADDT;          // ADDT \  IEEE T-float (double) arith via SSE:
       if (baseop == 0x21) return OP_SUBT;          // SUBT  > f[Fc] = f[Fa] op f[Fb]
       if (baseop == 0x22) return OP_MULT;          // MULT  |
       if (baseop == 0x23) return OP_DIVT;          // DIVT /
+      if (baseop == 0x2c) return OP_CVTTS;         // CVTTS (T->S narrow): f[Fc] = round_single(f[Fb])
       if (baseop == 0x3e && (f & 0x300) != 0x100) return OP_CVTQT;  // CVTQT: f[Fc] = (double)(s64) f[Fb]
       if (baseop == 0x3c && (f & 0x300) != 0x100) return OP_CVTQS;  // CVTQS: f[Fc] = (single)(s64) f[Fb]
-      return OP_NONE;                               // remaining 0x16 (S-float ADD/SUB/MUL/DIV, CVTTS/CVTTQ/CVTST): not yet
+      return OP_NONE;                               // all other 0x16 funcs interpreted
     }
     case 0x1c: // FPTI (CIX/BWX/MVI/FP-moves): the sign-extends, bit-counts, and FP->int register
       // moves compile here (CTPOP needs host POPCNT). MVI packed media (PERR/MIN/MAX/PK/UNPK)
@@ -1169,6 +1192,163 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
         a.shl(x86::rax, imm(62));                                       // true -> 0x4000000000000000 (2.0)
       }
       a.mov(x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) rc), x86::rax);     // f[Fc]
+      a.jmp(cont);
+      a.bind(bail);
+      set_pc(b->tag + 4 * (uint64_t) i);
+      a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::r14d); a.jmp(done);
+      a.bind(cont);
+      continue;
+    }
+
+    // IEEE convert / sqrt / S-float class-check bails (used by the blocks below). <bl> is each
+    // block's bail label; bail if denormal (always) or Inf|NaN (when chk). dbl = double, sgl = single.
+    auto dbl_bail = [&](const x86::Vec& x, bool chk, const Label& bl) {
+      Label ok = a.new_label();
+      a.movq(x86::rax, x); a.mov(x86::rcx, x86::rax);
+      a.shr(x86::rcx, imm(52)); a.and_(x86::ecx, imm(0x7ff));
+      if (chk) { a.cmp(x86::ecx, imm(0x7ff)); a.je(bl); }
+      a.test(x86::ecx, x86::ecx); a.jnz(ok);
+      a.shl(x86::rax, imm(12)); a.jnz(bl);
+      a.bind(ok);
+    };
+    auto sgl_bail = [&](const x86::Vec& x, bool chk, const Label& bl) {
+      Label ok = a.new_label();
+      a.movd(x86::eax, x); a.mov(x86::ecx, x86::eax);
+      a.shr(x86::ecx, imm(23)); a.and_(x86::ecx, imm(0xff));
+      if (chk) { a.cmp(x86::ecx, imm(0xff)); a.je(bl); }
+      a.test(x86::ecx, x86::ecx); a.jnz(ok);
+      a.shl(x86::eax, imm(9)); a.jnz(bl);
+      a.bind(ok);
+    };
+    auto fp_dyn_bail = [&](const Label& bl) {     // /D: SSE rounds to nearest, so bail unless FPCR does too
+      a.mov(x86::rax, x86::qword_ptr(x86::rbp, m_off.fpcr));
+      a.shr(x86::rax, imm(58)); a.and_(x86::eax, imm(3));
+      a.cmp(x86::eax, imm(2)); a.jne(bl);
+    };
+
+    // CVTST (S->T widen): zero/normal/Inf are already valid T bit patterns -> copy. S-denormal
+    // (renormalizes) and NaN (quiets / may INV) go to the interpreter. No rounding or inexact.
+    if (op == OP_CVTST) {
+      Label bail = a.new_label(), cont = a.new_label();
+      a.cmp(x86::byte_ptr(x86::rbp, m_off.fpen), imm(0)); a.je(bail);          // FPSTART
+      a.mov(x86::qword_ptr(x86::rbp, m_off.exc_sum), imm(0));
+      a.movq(x86::xmm0, x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) rb));   // f[Fb]
+      dbl_bail(x86::xmm0, true, bail);                                        // denormal/Inf/NaN -> interp
+      a.movq(x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) rc), x86::xmm0);   // S bits are valid T
+      a.jmp(cont);
+      a.bind(bail);
+      set_pc(b->tag + 4 * (uint64_t) i);
+      a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::r14d); a.jmp(done);
+      a.bind(cont);
+      continue;
+    }
+
+    // CVTTS (T->S narrow): round the double to single, re-widen for the S register format. Denormal
+    // operand, an Inf/NaN/denormal single result (overflow/invalid/underflow), or a first inexact
+    // (INE clear) bail.
+    if (op == OP_CVTTS) {
+      const bool dyn = (((ins >> 11) & 3) == 3);
+      Label bail = a.new_label(), cont = a.new_label();
+      a.cmp(x86::byte_ptr(x86::rbp, m_off.fpen), imm(0)); a.je(bail);          // FPSTART
+      a.mov(x86::qword_ptr(x86::rbp, m_off.exc_sum), imm(0));
+      a.bt(x86::qword_ptr(x86::rbp, m_off.fpcr), imm(56)); a.jnc(bail);        // INE clear -> first inexact traps
+      if (dyn) fp_dyn_bail(bail);
+      a.movq(x86::xmm0, x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) rb));   // f[Fb] (double)
+      dbl_bail(x86::xmm0, false, bail);                                       // denormal operand -> interp
+      a.cvtsd2ss(x86::xmm0, x86::xmm0);                                       // round to single
+      sgl_bail(x86::xmm0, true, bail);                                        // Inf/NaN/denormal single -> interp
+      a.cvtss2sd(x86::xmm0, x86::xmm0);                                       // -> double (register format)
+      a.movq(x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) rc), x86::xmm0);
+      a.jmp(cont);
+      a.bind(bail);
+      set_pc(b->tag + 4 * (uint64_t) i);
+      a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::r14d); a.jmp(done);
+      a.bind(cont);
+      continue;
+    }
+
+    // CVTTQ (T->Q): double -> signed 64-bit integer (raw bits into f[Fc]). /C chops (cvttsd2si), else
+    // round-to-nearest (cvtsd2si). Overflow / Inf / NaN -> the integer indefinite -> interp (covers
+    // IOV). A non-integer source (inexact) with INE clear traps -> interp; exact converts run inline.
+    if (op == OP_CVTTQ) {
+      const bool chop = (((ins >> 11) & 3) == 0);
+      const bool dyn  = (((ins >> 11) & 3) == 3);
+      Label bail = a.new_label(), cont = a.new_label(), exact = a.new_label();
+      a.cmp(x86::byte_ptr(x86::rbp, m_off.fpen), imm(0)); a.je(bail);          // FPSTART
+      a.mov(x86::qword_ptr(x86::rbp, m_off.exc_sum), imm(0));
+      if (dyn) fp_dyn_bail(bail);
+      a.movq(x86::xmm0, x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) rb));   // f[Fb] (double)
+      dbl_bail(x86::xmm0, false, bail);                                       // denormal operand -> interp
+      if (chop) a.cvttsd2si(x86::rax, x86::xmm0); else a.cvtsd2si(x86::rax, x86::xmm0);
+      a.mov(x86::ecx, imm(1)); a.shl(x86::rcx, imm(63));                      // rcx = INT64_MIN (indefinite)
+      a.cmp(x86::rax, x86::rcx); a.je(bail);                                  // overflow / Inf / NaN -> interp
+      a.cvtsi2sd(x86::xmm1, x86::rax);                                        // round-trip to test exactness
+      a.ucomisd(x86::xmm1, x86::xmm0); a.je(exact);                           // round-trip == source -> exact
+      a.bt(x86::qword_ptr(x86::rbp, m_off.fpcr), imm(56)); a.jnc(bail);       // inexact + INE clear -> trap
+      a.bind(exact);
+      a.mov(x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) rc), x86::rax);     // store s64 bits
+      a.jmp(cont);
+      a.bind(bail);
+      set_pc(b->tag + 4 * (uint64_t) i);
+      a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::r14d); a.jmp(done);
+      a.bind(cont);
+      continue;
+    }
+
+    // IEEE SQRT (T/S): sqrtsd / sqrtss. Denormal operand, an Inf/NaN/denormal result (a negative
+    // operand yields NaN), or a first inexact (INE clear) bail to the interpreter.
+    if (op == OP_SQRTT || op == OP_SQRTS) {
+      const bool dyn = (((ins >> 11) & 3) == 3);
+      Label bail = a.new_label(), cont = a.new_label();
+      a.cmp(x86::byte_ptr(x86::rbp, m_off.fpen), imm(0)); a.je(bail);          // FPSTART
+      a.mov(x86::qword_ptr(x86::rbp, m_off.exc_sum), imm(0));
+      a.bt(x86::qword_ptr(x86::rbp, m_off.fpcr), imm(56)); a.jnc(bail);        // INE clear -> first inexact traps
+      if (dyn) fp_dyn_bail(bail);
+      a.movq(x86::xmm0, x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) rb));   // f[Fb]
+      dbl_bail(x86::xmm0, false, bail);                                       // denormal operand -> interp
+      if (op == OP_SQRTT) {
+        a.sqrtsd(x86::xmm0, x86::xmm0);
+        dbl_bail(x86::xmm0, true, bail);                                      // Inf/NaN(neg)/denormal result -> interp
+      } else {
+        a.cvtsd2ss(x86::xmm0, x86::xmm0);
+        a.sqrtss(x86::xmm0, x86::xmm0);
+        sgl_bail(x86::xmm0, true, bail);                                      // Inf/NaN(neg)/denormal result -> interp
+        a.cvtss2sd(x86::xmm0, x86::xmm0);
+      }
+      a.movq(x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) rc), x86::xmm0);
+      a.jmp(cont);
+      a.bind(bail);
+      set_pc(b->tag + 4 * (uint64_t) i);
+      a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::r14d); a.jmp(done);
+      a.bind(cont);
+      continue;
+    }
+
+    // IEEE S-float arith (ADDS/SUBS/MULS/DIVS): compute in single precision (narrow the operands,
+    // op, re-widen). Same bail policy as the T-float arith -- FP-off, /D-not-nearest, denormal
+    // operand, INE clear, or an Inf/NaN/denormal single result.
+    if (op == OP_ADDS || op == OP_SUBS || op == OP_MULS || op == OP_DIVS) {
+      const bool dyn = (((ins >> 11) & 3) == 3);
+      Label bail = a.new_label(), cont = a.new_label();
+      a.cmp(x86::byte_ptr(x86::rbp, m_off.fpen), imm(0)); a.je(bail);          // FPSTART
+      a.mov(x86::qword_ptr(x86::rbp, m_off.exc_sum), imm(0));
+      a.bt(x86::qword_ptr(x86::rbp, m_off.fpcr), imm(56)); a.jnc(bail);        // INE clear -> first inexact traps
+      if (dyn) fp_dyn_bail(bail);
+      a.movq(x86::xmm0, x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) ra));   // f[Fa]
+      a.movq(x86::xmm1, x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) rb));   // f[Fb]
+      dbl_bail(x86::xmm0, false, bail);                                       // denormal operands -> interp
+      dbl_bail(x86::xmm1, false, bail);
+      a.cvtsd2ss(x86::xmm0, x86::xmm0);                                       // operands -> single (exact)
+      a.cvtsd2ss(x86::xmm1, x86::xmm1);
+      switch (op) {
+        case OP_ADDS: a.addss(x86::xmm0, x86::xmm1); break;
+        case OP_SUBS: a.subss(x86::xmm0, x86::xmm1); break;
+        case OP_MULS: a.mulss(x86::xmm0, x86::xmm1); break;
+        default:      a.divss(x86::xmm0, x86::xmm1); break;                   // OP_DIVS
+      }
+      sgl_bail(x86::xmm0, true, bail);                                        // Inf/NaN/denormal single result -> interp
+      a.cvtss2sd(x86::xmm0, x86::xmm0);                                       // -> double (register format)
+      a.movq(x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) rc), x86::xmm0);
       a.jmp(cont);
       a.bind(bail);
       set_pc(b->tag + 4 * (uint64_t) i);
