@@ -50,6 +50,7 @@ enum SafeOp {
   OP_FLTL,                                       // FLTL (0x17) non-arithmetic: FPCR moves, CPYSx, FCMOVx, CVTLQ/QL
   OP_CVTQT, OP_CVTQS,                            // FLTI (0x16) int->IEEE convert: f[Fc] = (T/S)(s64)f[Fb] via SSE
   OP_ADDT, OP_SUBT, OP_MULT, OP_DIVT,            // FLTI (0x16) IEEE T-float arith: f[Fc] = f[Fa] op f[Fb] via SSE
+  OP_CMPTUN, OP_CMPTEQ, OP_CMPTLT, OP_CMPTLE,    // FLTI (0x16) IEEE T-float compares: f[Fc] = (cmp) ? 2.0 : 0.0
   OP_FLTV,                                       // FLTV (0x15) VAX arith/convert/compare: f[Fc] via jit_fltv helper
   OP_AND, OP_BIS, OP_XOR, OP_BIC, OP_ORNOT, OP_EQV,
   OP_CMOV,                       // INTL (0x11) conditional moves CMOVxx: Rc = cond(Ra) ? op2 : Rc
@@ -194,6 +195,10 @@ SafeOp classify(uint32_t ins, bool pal_block)
       if (rnd == 0 || rnd == 1) return OP_NONE;     // chopped / minus-inf: SSE rounds to nearest -> interpret
       if (((f >> 8) & 7) == 7) return OP_NONE;      // /SUI: traps on every inexact -> interpret
       if ((ins & 0x1f) == 31) return OP_NONE;       // Fc==31: interp zeroes f[31] per instr
+      if (f == 0x0a4 || f == 0x5a4) return OP_CMPTUN;   // IEEE compares (None + /SU): f[Fc] = (cmp) ? 2.0 : 0.0
+      if (f == 0x0a5 || f == 0x5a5) return OP_CMPTEQ;   // full-function; a NaN operand bails to the interp
+      if (f == 0x0a6 || f == 0x5a6) return OP_CMPTLT;
+      if (f == 0x0a7 || f == 0x5a7) return OP_CMPTLE;
       const uint32_t baseop = f & 0x3f;
       if (baseop == 0x20) return OP_ADDT;          // ADDT \  IEEE T-float (double) arith via SSE:
       if (baseop == 0x21) return OP_SUBT;          // SUBT  > f[Fc] = f[Fa] op f[Fb]
@@ -201,7 +206,7 @@ SafeOp classify(uint32_t ins, bool pal_block)
       if (baseop == 0x23) return OP_DIVT;          // DIVT /
       if (baseop == 0x3e && (f & 0x300) != 0x100) return OP_CVTQT;  // CVTQT: f[Fc] = (double)(s64) f[Fb]
       if (baseop == 0x3c && (f & 0x300) != 0x100) return OP_CVTQS;  // CVTQS: f[Fc] = (single)(s64) f[Fb]
-      return OP_NONE;                               // remaining 0x16 (S-float ADD/SUB/MUL/DIV, CMPTxx, CVTTS/Q, CVTST): not yet
+      return OP_NONE;                               // remaining 0x16 (S-float ADD/SUB/MUL/DIV, CVTTS/CVTTQ/CVTST): not yet
     }
     case 0x1c: // FPTI (CIX/BWX/MVI/FP-moves): the sign-extends, bit-counts, and FP->int register
       // moves compile here (CTPOP needs host POPCNT). MVI packed media (PERR/MIN/MAX/PK/UNPK)
@@ -1125,6 +1130,45 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       }
       class_bail(x86::xmm0, true);                                           // Inf/NaN/denormal result -> interp
       a.movq(x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) rc), x86::xmm0);   // f[Fc]
+      a.jmp(cont);
+      a.bind(bail);
+      set_pc(b->tag + 4 * (uint64_t) i);
+      a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::r14d); a.jmp(done);
+      a.bind(cont);
+      continue;
+    }
+
+    // IEEE T-float compares (0x16 CMPTUN/EQ/LT/LE): f[Fc] = (Fa cmp Fb) ? 2.0 : 0.0. No rounding or
+    // inexact -- only a NaN operand needs the interpreter (it owns the INV / quiet-NaN / SWC rules);
+    // ordered operands (incl. +/-Inf and denormals) compare inline via ucomisd. Two ordered operands
+    // make CMPTUN always false.
+    if (op == OP_CMPTUN || op == OP_CMPTEQ || op == OP_CMPTLT || op == OP_CMPTLE) {
+      Label bail = a.new_label(), cont = a.new_label();
+      auto nan_bail = [&](const x86::Vec& x) {                          // bail only on NaN (exp all-ones, frac != 0)
+        Label ok = a.new_label();
+        a.movq(x86::rax, x);
+        a.mov(x86::rcx, x86::rax);
+        a.shr(x86::rcx, imm(52)); a.and_(x86::ecx, imm(0x7ff));
+        a.cmp(x86::ecx, imm(0x7ff)); a.jne(ok);                         // exp != all-ones -> finite or Inf
+        a.shl(x86::rax, imm(12)); a.jnz(bail);                          // exp all-ones, mantissa != 0 -> NaN
+        a.bind(ok);
+      };
+      a.cmp(x86::byte_ptr(x86::rbp, m_off.fpen), imm(0)); a.je(bail);   // FPSTART
+      a.mov(x86::qword_ptr(x86::rbp, m_off.exc_sum), imm(0));
+      a.movq(x86::xmm0, x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) ra));   // f[Fa]
+      a.movq(x86::xmm1, x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) rb));   // f[Fb]
+      nan_bail(x86::xmm0); nan_bail(x86::xmm1);
+      if (op == OP_CMPTUN) {
+        a.xor_(x86::eax, x86::eax);                                     // both ordered -> unordered is false
+      } else {
+        a.ucomisd(x86::xmm0, x86::xmm1);
+        if      (op == OP_CMPTEQ) a.sete(x86::al);                      // ZF    -> Fa == Fb
+        else if (op == OP_CMPTLT) a.setb(x86::al);                      // CF    -> Fa <  Fb
+        else                      a.setbe(x86::al);                     // CF|ZF -> Fa <= Fb  (CMPTLE)
+        a.movzx(x86::eax, x86::al);
+        a.shl(x86::rax, imm(62));                                       // true -> 0x4000000000000000 (2.0)
+      }
+      a.mov(x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) rc), x86::rax);     // f[Fc]
       a.jmp(cont);
       a.bind(bail);
       set_pc(b->tag + 4 * (uint64_t) i);
