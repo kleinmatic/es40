@@ -48,6 +48,7 @@ enum SafeOp {
   OP_FTOIS, OP_FTOIT,                            // FPTI (0x1c) FP->int reg moves: Rc = fmt(f[Fa])
   OP_FLTL,                                       // FLTL (0x17) non-arithmetic: FPCR moves, CPYSx, FCMOVx, CVTLQ/QL
   OP_CVTQT, OP_CVTQS,                            // FLTI (0x16) int->IEEE convert: f[Fc] = (T/S)(s64)f[Fb] via SSE
+  OP_ADDT, OP_SUBT, OP_MULT, OP_DIVT,            // FLTI (0x16) IEEE T-float arith: f[Fc] = f[Fa] op f[Fb] via SSE
   OP_FLTV,                                       // FLTV (0x15) VAX arith/convert/compare: f[Fc] via jit_fltv helper
   OP_AND, OP_BIS, OP_XOR, OP_BIC, OP_ORNOT, OP_EQV,
   OP_CMOV,                       // INTL (0x11) conditional moves CMOVxx: Rc = cond(Ra) ? op2 : Rc
@@ -193,9 +194,13 @@ SafeOp classify(uint32_t ins, bool pal_block)
       if (((f >> 8) & 7) == 7) return OP_NONE;      // /SUI: traps on every inexact -> interpret
       if ((ins & 0x1f) == 31) return OP_NONE;       // Fc==31: interp zeroes f[31] per instr
       const uint32_t baseop = f & 0x3f;
+      if (baseop == 0x20) return OP_ADDT;          // ADDT \  IEEE T-float (double) arith via SSE:
+      if (baseop == 0x21) return OP_SUBT;          // SUBT  > f[Fc] = f[Fa] op f[Fb]
+      if (baseop == 0x22) return OP_MULT;          // MULT  |
+      if (baseop == 0x23) return OP_DIVT;          // DIVT /
       if (baseop == 0x3e && (f & 0x300) != 0x100) return OP_CVTQT;  // CVTQT: f[Fc] = (double)(s64) f[Fb]
       if (baseop == 0x3c && (f & 0x300) != 0x100) return OP_CVTQS;  // CVTQS: f[Fc] = (single)(s64) f[Fb]
-      return OP_NONE;                               // other 0x16 ops (ADD/SUB/MUL/DIV/CMP/CVTT*): not yet
+      return OP_NONE;                               // remaining 0x16 (S-float ADD/SUB/MUL/DIV, CMPTxx, CVTTS/Q, CVTST): not yet
     }
     case 0x1c: // FPTI (CIX/BWX/MVI/FP-moves): the sign-extends, bit-counts, and FP->int register
       // moves compile here (CTPOP needs host POPCNT). MVI packed media (PERR/MIN/MAX/PK/UNPK)
@@ -1077,6 +1082,51 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       a.jmp(cont);
       a.bind(bail);
       set_pc(b->tag + 4 * (uint64_t) i);              // resume this instruction in the interpreter
+      a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::r14d); a.jmp(done);
+      a.bind(cont);
+      continue;
+    }
+
+    // IEEE T-float arithmetic (0x16 ADDT/SUBT/MULT/DIVT): inline SSE on the double f-registers. 
+    // FPCR.INE already sticky-set (so an inexact result won't trap). Every edge bails to the interpreter:
+    // FP-off, /D-not-nearest, denormal operand, INE-clear (a first inexact would trap), or an Inf/NaN/
+    // denormal result (overflow/invalid/div-zero/underflow). 
+    if (op == OP_ADDT || op == OP_SUBT || op == OP_MULT || op == OP_DIVT) {
+      const bool dyn = (((ins >> 11) & 3) == 3);      // /D: rounding is FPCR<59:58>, checked at runtime
+      Label bail = a.new_label(), cont = a.new_label();
+      auto class_bail = [&](const x86::Vec& x, bool chk_inf_nan) {   // bail if denormal (always) / Inf|NaN (if asked)
+        Label ok = a.new_label();
+        a.movq(x86::rax, x);
+        a.mov(x86::rcx, x86::rax);
+        a.shr(x86::rcx, imm(52)); a.and_(x86::ecx, imm(0x7ff));      // biased exponent
+        if (chk_inf_nan) { a.cmp(x86::ecx, imm(0x7ff)); a.je(bail); }
+        a.test(x86::ecx, x86::ecx); a.jnz(ok);                       // exp != 0 -> normal (or Inf/NaN)
+        a.shl(x86::rax, imm(12)); a.jnz(bail);                       // exp == 0, mantissa != 0 -> denormal
+        a.bind(ok);
+      };
+      a.cmp(x86::byte_ptr(x86::rbp, m_off.fpen), imm(0)); a.je(bail);          // FPSTART: FP disabled -> FEN trap
+      a.mov(x86::qword_ptr(x86::rbp, m_off.exc_sum), imm(0));
+      a.bt(x86::qword_ptr(x86::rbp, m_off.fpcr), imm(56)); a.jnc(bail);        // INE clear -> first inexact traps
+      if (dyn) {                                                              // dynamic rounding: SSE gives nearest
+        a.mov(x86::rax, x86::qword_ptr(x86::rbp, m_off.fpcr));
+        a.shr(x86::rax, imm(58)); a.and_(x86::eax, imm(3));
+        a.cmp(x86::eax, imm(2)); a.jne(bail);
+      }
+      a.movq(x86::xmm0, x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) ra));   // f[Fa]
+      a.movq(x86::xmm1, x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) rb));   // f[Fb]
+      class_bail(x86::xmm0, false);                                           // denormal operand -> interp (DNZ/trap)
+      class_bail(x86::xmm1, false);
+      switch (op) {
+        case OP_ADDT: a.addsd(x86::xmm0, x86::xmm1); break;
+        case OP_SUBT: a.subsd(x86::xmm0, x86::xmm1); break;
+        case OP_MULT: a.mulsd(x86::xmm0, x86::xmm1); break;
+        default:      a.divsd(x86::xmm0, x86::xmm1); break;                   // OP_DIVT
+      }
+      class_bail(x86::xmm0, true);                                           // Inf/NaN/denormal result -> interp
+      a.movq(x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) rc), x86::xmm0);   // f[Fc]
+      a.jmp(cont);
+      a.bind(bail);
+      set_pc(b->tag + 4 * (uint64_t) i);
       a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::r14d); a.jmp(done);
       a.bind(cont);
       continue;
