@@ -352,6 +352,9 @@
 #include "cpu_mvi.h"
 #include "cpu_pal.h"
 #include "cpu_debug.h"
+#if defined(_M_X64) || defined(__x86_64__)
+#include <xmmintrin.h>   // _mm_setcsr: pin host MXCSR for the JIT SSE FP path
+#endif
 
 void CAlphaCPU::release_threads()
 {
@@ -375,6 +378,12 @@ void CAlphaCPU::run()
 			CThread::sleep(1);
 		}
 		printf("*** CPU%d *** STARTING ***\n", get_cpuid());
+
+#if defined(_M_X64) || defined(__x86_64__)
+		// Pin host SSE state for the JIT FP path: round-nearest, exceptions masked,
+		// FTZ/DAZ off (denormal results must materialize to hit the interp-bail).
+		_mm_setcsr(0x1F80);
+#endif
 
 		// Re-base the timing-calibration epoch to when execution actually begins:
 		// a secondary parks (wait_for_start) before the primary releases it, so
