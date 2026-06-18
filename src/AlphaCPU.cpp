@@ -3486,19 +3486,26 @@ int CAlphaCPU::virt2phys(u64 virt, u64* phys, int flags, bool* asm_bit, u32 ins)
 	return 0;
 }
 
-#define GH_0_MATCH  U64(0x000007ffffffe000) /* <42:13> */
-#define GH_0_PHYS   U64(0x00000fffffffe000) /* <43:13> */
-#define GH_0_KEEP   U64(0x0000000000001fff) /* <12:0>  */
+/*
+ * EV68CB/EV68DC HRM:
+ *  - 5.3.1, Figure 5-26: DTB_TAG0/1 contain VA[47:13].
+ *  - 5.3.2, Figure 5-27: DTB_PTE0/1 contain PA[43:13] and GH[1:0].
+ * GH widens the granule by 3 bits per step, so the low 13/16/19/22 bits
+ * are kept from the virtual address and excluded from the tag/PFN masks.
+ */
+#define GH_0_MATCH  U64(0x0000ffffffffe000) /* VA <47:13> */
+#define GH_0_PHYS   U64(0x00000fffffffe000) /* PA <43:13> */
+#define GH_0_KEEP   U64(0x0000000000001fff) /* VA <12:0>  */
 
-#define GH_1_MATCH  U64(0x000007ffffff0000)
-#define GH_1_PHYS   U64(0x00000fffffff0000)
-#define GH_1_KEEP   U64(0x000000000000ffff)
-#define GH_2_MATCH  U64(0x000007fffff80000)
-#define GH_2_PHYS   U64(0x00000ffffff80000)
-#define GH_2_KEEP   U64(0x000000000007ffff)
-#define GH_3_MATCH  U64(0x000007ffffc00000)
-#define GH_3_PHYS   U64(0x00000fffffc00000)
-#define GH_3_KEEP   U64(0x00000000003fffff)
+#define GH_1_MATCH  U64(0x0000ffffffff0000) /* VA <47:16> */
+#define GH_1_PHYS   U64(0x00000fffffff0000) /* PA <43:16> */
+#define GH_1_KEEP   U64(0x000000000000ffff) /* VA <15:0>  */
+#define GH_2_MATCH  U64(0x0000fffffff80000) /* VA <47:19> */
+#define GH_2_PHYS   U64(0x00000ffffff80000) /* PA <43:19> */
+#define GH_2_KEEP   U64(0x000000000007ffff) /* VA <18:0>  */
+#define GH_3_MATCH  U64(0x0000ffffffc00000) /* VA <47:22> */
+#define GH_3_PHYS   U64(0x00000fffffc00000) /* PA <43:22> */
+#define GH_3_KEEP   U64(0x00000000003fffff) /* VA <21:0>  */
 
 /**
  * \brief Add translation-buffer entry
