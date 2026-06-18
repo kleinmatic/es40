@@ -1162,25 +1162,27 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     }
 
     // IEEE T-float compares (0x16 CMPTUN/EQ/LT/LE): f[Fc] = (Fa cmp Fb) ? 2.0 : 0.0. No rounding or
-    // inexact -- only a NaN operand needs the interpreter (it owns the INV / quiet-NaN / SWC rules);
-    // ordered operands (incl. +/-Inf and denormals) compare inline via ucomisd. Two ordered operands
-    // make CMPTUN always false.
+    // inexact. A NaN operand (INV / quiet-NaN / SWC rules) or a denormal operand (unmaskable denormal
+    // trap -- the interp's ieee_fcmp traps via ieee_unpack) goes to the interp; +/-Inf, zero and
+    // normals compare inline via ucomisd. Two ordered operands make CMPTUN always false.
     if (op == OP_CMPTUN || op == OP_CMPTEQ || op == OP_CMPTLT || op == OP_CMPTLE) {
       Label bail = a.new_label(), cont = a.new_label();
-      auto nan_bail = [&](const x86::Vec& x) {                          // bail only on NaN (exp all-ones, frac != 0)
-        Label ok = a.new_label();
+      auto cmp_bail = [&](const x86::Vec& x) {                          // bail on NaN or denormal; Inf/zero/normal -> ok
+        Label ok = a.new_label(), special = a.new_label();
         a.movq(x86::rax, x);
         a.mov(x86::rcx, x86::rax);
-        a.shr(x86::rcx, imm(52)); a.and_(x86::ecx, imm(0x7ff));
-        a.cmp(x86::ecx, imm(0x7ff)); a.jne(ok);                         // exp != all-ones -> finite or Inf
-        a.shl(x86::rax, imm(12)); a.jnz(bail);                          // exp all-ones, mantissa != 0 -> NaN
-        a.bind(ok);
+        a.shr(x86::rcx, imm(52)); a.and_(x86::ecx, imm(0x7ff));         // biased exponent
+        a.cmp(x86::ecx, imm(0x7ff)); a.je(special);                     // exp all-ones -> Inf or NaN
+        a.test(x86::ecx, x86::ecx); a.jnz(ok);                          // exp != 0 -> normal
+        a.bind(special);                                                // exp == 0 (zero/denormal) or all-ones (Inf/NaN)
+        a.shl(x86::rax, imm(12)); a.jnz(bail);                          // mantissa != 0 -> denormal or NaN -> bail
+        a.bind(ok);                                                     // mantissa == 0 -> zero or Inf -> compare inline
       };
       a.cmp(x86::byte_ptr(x86::rbp, m_off.fpen), imm(0)); a.je(bail);   // FPSTART
       a.mov(x86::qword_ptr(x86::rbp, m_off.exc_sum), imm(0));
       a.movq(x86::xmm0, x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) ra));   // f[Fa]
       a.movq(x86::xmm1, x86::qword_ptr(x86::rbp, m_off.f_base + 8u * (uint32_t) rb));   // f[Fb]
-      nan_bail(x86::xmm0); nan_bail(x86::xmm1);
+      cmp_bail(x86::xmm0); cmp_bail(x86::xmm1);
       if (op == OP_CMPTUN) {
         a.xor_(x86::eax, x86::eax);                                     // both ordered -> unordered is false
       } else {

@@ -259,6 +259,8 @@ u64 CAlphaCPU::ieee_cvtst(u64 op, u32 ins)
 	u32 ftpb = ieee_unpack(op, &b, ins);
 	if (ftpb == UFT_NAN)
 		return op | QNAN;
+	if (ftpb == UFT_ZERO)
+		return op & FPR_SIGN; /* DNZ flushed a denormal to its signed zero (AAR 4.7.7.11) */
 	return op;
 }
 
