@@ -291,15 +291,17 @@ SafeOp classify(uint32_t ins, bool pal_block)
       return OP_NONE;
     }
     case 0x1d: {                // HW_MTPR (PALmode): compile the pure-store IPRs, the TB fills
-      // (idempotent add_tb_i/_d), IER (field stores + check_int kick), and the ITB invalidates
-      // (idempotent tbia/tbiap/tbis -> note_itb_invalidate). DTB invalidates (dpc coherence),
-      // IC_FLUSH, CM, SIRR/HW_INT_CLR, PAL_BASE, i_ctl, the 0x40-7f group stay interpreted.
+      // (idempotent add_tb_i/_d), IER (field stores + check_int kick), the ITB invalidates (idempotent
+      // tbia/tbiap/tbis -> note_itb_invalidate), and IC_FLUSH (lazy flush; reclaim deferred off the
+      // compiled frame). DTB invalidates (dpc coherence), CM, SIRR/HW_INT_CLR, PAL_BASE, i_ctl, the
+      // 0x40-7f group stay interpreted.
       if (!pal_block) return OP_NONE;
       switch ((ins >> 8) & 0xff) {
         case 0x00: case 0x14: case 0x20: case 0x26:   // ITB_TAG, PCTR_CTL, DTB_TAG0, DTB_ALTMODE
         case 0x29: case 0xa0: case 0xc0:              // DC_CTL, DTB_TAG1, CC
         case 0x01: case 0x21: case 0xa1:              // ITB_PTE, DTB_PTE0, DTB_PTE1 (TB fills)
         case 0x02: case 0x03: case 0x04:              // ITB_IAP, ITB_IA, ITB_IS (idempotent ITB invalidates)
+        case 0x13:                                    // IC_FLUSH (lazy gen-bump flush; reclaim deferred off-frame)
         case 0x0a:                                    // IER (interrupt enables + check_int kick)
           return OP_HW_MTPR;
         case 0x15: case 0x17: case 0x27:              // CLR_MAP, SLEEP, MM_STAT (no-ops)
@@ -479,6 +481,7 @@ void CJitEngine::reclaim_code()
   delete (asmjit::JitRuntime*) m_rt;
   m_rt = new asmjit::JitRuntime();
   m_code_bytes = 0;
+  m_reclaim_pending = false;   // a reclaim (cold-path or deferred) satisfies any pending request
   for (int i = 0; i < kCacheEntries; ++i) {
     m_blocks[i].valid = false;
     m_blocks[i].code = nullptr;
@@ -493,7 +496,8 @@ void CJitEngine::flush()
   // lookup() and revalidate_flushed() re-hashes their source bytes before they run again.
   ++m_flush_gen;
   if (m_rt && m_code_bytes >= kReclaimBytes)
-    reclaim_code();
+    m_reclaim_pending = true;   // DEFER: reclaim frees all code -- unsafe from a compiled IC_FLUSH;
+                                // reclaim_if_pending() does it at the next dispatch boundary.
 }
 
 // ASM-bit-clear icache flush (process/ASN switch): drop only !asm_global blocks. Global (ASM) PAL

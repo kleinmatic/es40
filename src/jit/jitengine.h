@@ -98,6 +98,9 @@ public:
   void flush();
   void flush_non_global();   // flush only !asm_global blocks (the ASM-bit-clear / ASN icache flush)
   void reclaim_code();       // free ALL compiled code once past kReclaimBytes (cold-path only)
+  // flush() can be reached from a compiled IC_FLUSH, so it DEFERS the reclaim (sets m_reclaim_pending);
+  // the dispatcher calls this at a safe point (no compiled frame live) to actually free the code.
+  inline void reclaim_if_pending() { if (m_reclaim_pending) { m_reclaim_pending = false; reclaim_code(); } }
 
   // ITB-generation counter for the indirect-chain staleness check (jit_indirect). Bumped on every
   // I-stream TB invalidate (tbia/tbiap/tbis, ACCESS_EXEC) ... those can remap a code page WITHOUT
@@ -127,6 +130,7 @@ private:
   uint64_t m_itb_gen = 0; // current ITB generation (bumped on every I-stream TB invalidate)
   uint64_t m_flush_gen = 0; // current icache-flush generation (bumped by flush(); lazy IC_FLUSH/IMB)
   uint64_t m_code_bytes;  // compiled bytes since last reclaim (see flush())
+  bool     m_reclaim_pending = false;   // flush() hit kReclaimBytes; reclaim at the next dispatch boundary
   void*    m_rt;          // asmjit::JitRuntime*
   JitOffsets m_off = {};  // field offsets for the inline load fast path
 #ifdef JIT_DISASM

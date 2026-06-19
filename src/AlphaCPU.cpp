@@ -753,6 +753,7 @@ void CAlphaCPU::jit_flush_blocks_asm()
 
 void CAlphaCPU::jit_run(int budget)
 {
+	if (m_jit) m_jit->reclaim_if_pending();   // deferred code reclaim, here at a safe point (no compiled frame live)
 	const auto now = std::chrono::steady_clock::now();
 	const auto cc_delta = now - cc_last_sync;
 	cc_last_sync = now;
@@ -1674,6 +1675,7 @@ void CAlphaCPU::jit_hw_mtpr(CAlphaCPU* cpu, u32 function, u64 value)
 	case 0x02: cpu->tbiap(ACCESS_EXEC); break;                                  // ITB_IAP (process ITB invalidate)
 	case 0x03: cpu->tbia(ACCESS_EXEC); break;                                   // ITB_IA (invalidate all ITB)
 	case 0x04: cpu->tbis(value, ACCESS_EXEC); break;                            // ITB_IS (single ITB invalidate)
+	case 0x13: cpu->flush_icache(); break;                                      // IC_FLUSH (lazy flush + deferred reclaim)
 	case 0x0a:                                                                   // IER
 		cpu->state.asten = (int) (value >> 13) & 1;
 		cpu->state.sien  = (int) (value >> 13) & 0xfffe;
