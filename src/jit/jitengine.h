@@ -14,6 +14,9 @@
 
 #include <cstdint>
 #include "../config_debug.h"   // JIT_VERIFY
+#if defined(JIT_REGPROF) && !defined(JIT_STATS)
+#error "JIT_REGPROF needs JIT_STATS (its report rides note_exec's 100M-instruction window)"
+#endif
 #ifdef JIT_DISASM
 #include <cstdio>              // FILE* for the per-CPU disassembly trace
 #endif
@@ -59,6 +62,10 @@ public:
                           // -- the single chain guard (see emit_chain / jit_indirect).
     uint64_t flush_gen;   // icache-flush generation at which the code bytes were last hash-validated;
                           // stale => lookup misses and revalidate_flushed() re-hashes (lazy IC_FLUSH)
+#ifdef JIT_REGPROF
+    uint64_t rp_hits;     // REGPROF: block executions since record (body-entry inc -- counts chained runs)
+    uint32_t rp_mask;     // REGPROF: Alpha GPRs touched by this block (bit r); compile-time, exec-weighted at report
+#endif
   };
 
   // Byte offsets (from the CAlphaCPU*) of the fields the inline load fast path reads,
@@ -121,6 +128,13 @@ public:
   // Returns the wall-clock ns spent in this call's stats-print I/O (0 when it doesn't report),
   // so the dispatcher can exclude that stall from the wall-clock-pinned RPCC.
   uint64_t note_exec(uint32_t native_instr, uint32_t interp_instr);
+#endif
+
+#ifdef JIT_REGPROF
+  // Pin-selection profiler: per-block executions (rp_hits) x the block's GPR-access mask (rp_mask),
+  // summed over the live cache -> an execution-weighted histogram of which Alpha GPRs dominate the
+  // hot path. Prints the top registers periodically so we can choose the global pin set.
+  void regprof_report();
 #endif
 
 private:

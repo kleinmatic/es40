@@ -455,6 +455,9 @@ CJitEngine::JitBlock* CJitEngine::record(uint64_t virt_pc, uint64_t phys_pc, uin
   b.link = nullptr;       // no cached successor yet
   b.prefix_len = 0;
   b.compiled = false;
+#ifdef JIT_REGPROF
+  b.rp_hits = 0;          // fresh block: restart the exec counter (resurrect/revalidate keep theirs)
+#endif
   if (++m_recorded == 50000)
     printf("[JIT][CPU%d] block dispatcher active: 50000 blocks discovered.\n", m_cpu_id);
   return &b;
@@ -530,6 +533,43 @@ static const bool g_zapnot_init = [] {
   return true;
 }();
 
+#ifdef JIT_REGPROF
+// Bitmask of the Alpha integer GPRs a block's prefix touches (read or written), for pin selection.
+// Format-aware over the ops that drive the store-forward chains -- integer operate, memory, branch,
+// JMP, and the MISC state reads; FP / HW / CALL_PAL are skipped (not the GPR forwarding path).
+static uint32_t regprof_mask(const uint32_t* w, uint32_t n)
+{
+  uint32_t mask = 0;
+  auto touch = [&](int r) { if (r != 31) mask |= (1u << r); };   // R31 is hardwired 0, never a pin
+  for (uint32_t i = 0; i < n; ++i) {
+    const uint32_t ins = w[i];
+    const uint32_t op  = ins >> 26;
+    const int ra = (ins >> 21) & 0x1f, rb = (ins >> 16) & 0x1f, rc = ins & 0x1f;
+    const bool islit = ((ins >> 12) & 1) != 0;
+    switch (op) {
+      case 0x10: case 0x11: case 0x12: case 0x13: case 0x1c:     // integer operate: Ra, Rc, Rb(if reg)
+        touch(ra); touch(rc); if (!islit) touch(rb); break;
+      case 0x08: case 0x09: case 0x0a: case 0x0b: case 0x0c:     // LDA/LDAH + BWX ld/st: Ra, Rb(base)
+      case 0x0d: case 0x0e: case 0x0f:
+      case 0x28: case 0x29: case 0x2a: case 0x2b:                // int LDL/LDQ/LDx_L
+      case 0x2c: case 0x2d: case 0x2e: case 0x2f:                // int STL/STQ/STx_C
+      case 0x1a:                                                 // JMP/JSR/RET: Ra(link), Rb(target)
+        touch(ra); touch(rb); break;
+      case 0x30: case 0x34: case 0x38: case 0x39: case 0x3a:     // integer branches (incl BR/BSR link): Ra
+      case 0x3b: case 0x3c: case 0x3d: case 0x3e: case 0x3f:
+        touch(ra); break;
+      case 0x18: {                                               // MISC: RPCC/RC/RS write Ra
+        const uint32_t f = ins & 0xffff;
+        if (f == 0xc000 || f == 0xe000 || f == 0xf000) touch(ra);
+        break;
+      }
+      default: break;   // FP / HW / CALL_PAL: not the GPR forwarding path
+    }
+  }
+  return mask;
+}
+#endif
+
 void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper, void* hw_ld_helper, void* hw_mtpr_helper, void* hw_st_helper, void* indirect_helper, void* read_locked_helper, void* stc_helper, void* misc_helper, void* read_vpte_helper, void* itof_helper, void* ftoi_helper, void* fltl_helper, void* fp_read_helper, void* fp_write_helper, void* fltv_helper)
 {
   using namespace asmjit;
@@ -600,6 +640,9 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   }
 
   if (plen == 0) return;
+#ifdef JIT_REGPROF
+  b->rp_mask = regprof_mask(words, plen);   // GPR-access fingerprint; exec-weighted at report time
+#endif
 
   // Emit  uint32_t fn(CAlphaCPU* cpu, uint64_t* regs)  (Win64: cpu=RCX, regs=RDX).
   // Keep cpu in RBP and regs in RBX (callee-saved, so they survive helper calls);
@@ -647,6 +690,10 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   Label body = a.new_label();  // chained re-entry (after the prologue; preserves R14)
   a.bind(body);
   const size_t body_off = code.code_size();   // byte offset of the chained entry from fn
+#ifdef JIT_REGPROF
+  a.mov(x86::rax, imm((uint64_t) &b->rp_hits));   // REGPROF: count every execution (cold entry + chained re-entry)
+  a.inc(x86::qword_ptr(x86::rax));                // RAX is dead at body entry -- the first op reloads it
+#endif
 
   // The compiled block computes its own next PC into state.pc at every exit (the
   // foundation for branch compilation and block linking). R10 is scratch here.
@@ -1918,6 +1965,9 @@ uint64_t CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr)
   // Time this report's own blocking I/O so the caller can exclude it from the wall-clock-pinned
   // RPCC -- else the printf stall is billed to the guest cycle counter as a forward jump.
   const auto stat_t0 = std::chrono::steady_clock::now();
+#ifdef JIT_REGPROF
+  regprof_report();   // exec-weighted GPR histogram for pin selection (I/O timed within this window)
+#endif
   // Build each line in a buffer and print it with ONE call: 4 CPU threads print concurrently,
   // and per-item printf loops interleave mid-line. The [CPU%d] tag attributes each line.
   const double chain = m_stat_hot ? (double) m_stat_native / (double) m_stat_hot : 0.0;
@@ -1987,6 +2037,32 @@ uint64_t CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr)
   m_stat_native = m_stat_interp = m_stat_hot = m_stat_miss = 0;   // reset the window
   return (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
            std::chrono::steady_clock::now() - stat_t0).count();
+}
+#endif
+
+#ifdef JIT_REGPROF
+// Pin-selection report: attribute each live block's executions (rp_hits) to every GPR it touches
+// (rp_mask), then print the heaviest. A trailing '*' marks regs that CANNOT be pinned -- R4-7/R20-23,
+// the PALshadow remap targets (which also covers R23's CALL_PAL save). R31 is excluded by the mask.
+void CJitEngine::regprof_report()
+{
+  uint64_t hist[32] = { 0 };
+  for (int s = 0; s < kCacheEntries; ++s) {
+    const JitBlock& b = m_blocks[s];
+    if (!b.valid || b.rp_hits == 0) continue;
+    for (int r = 0; r < 31; ++r) if (b.rp_mask & (1u << r)) hist[r] += b.rp_hits;
+  }
+  char buf[256];
+  int  len = snprintf(buf, sizeof(buf), "[JIT][REGPROF][CPU%d] hot GPRs (exec x accesses):", m_cpu_id);
+  for (int rank = 0; rank < 8 && len < (int) sizeof(buf) - 24; ++rank) {
+    int best = -1; uint64_t bestv = 0;
+    for (int r = 0; r < 31; ++r) if (hist[r] > bestv) { bestv = hist[r]; best = r; }
+    if (best < 0) break;
+    const bool pinnable = (best & 0xc) != 0x4;   // exclude R4-7 / R20-23 (shadow remap; covers R23)
+    len += snprintf(buf + len, sizeof(buf) - len, " R%d=%llu%s", best, (unsigned long long) bestv, pinnable ? "" : "*");
+    hist[best] = 0;
+  }
+  printf("%s   (* = not pin-eligible)\n", buf);
 }
 #endif
 
