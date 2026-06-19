@@ -1956,6 +1956,9 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   m_stat_plen_sum += plen;
   m_stat_code_bytes += csz;
 #endif
+#ifdef JIT_REGPROF
+  b->rp_csz = (uint32_t) csz;   // exec-weighted expansion: sum(rp_hits*rp_csz) / sum(rp_hits*prefix_len)
+#endif
 }
 
 #ifdef JIT_VERIFY
@@ -2112,11 +2115,18 @@ uint64_t CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr)
 void CJitEngine::regprof_report()
 {
   uint64_t hist[32] = { 0 };
+  uint64_t exec_instr = 0, exec_bytes = 0;   // exec-weighted: hot-path Alpha instrs and emitted x86 bytes
   for (int s = 0; s < kCacheEntries; ++s) {
     const JitBlock& b = m_blocks[s];
     if (!b.valid || b.rp_hits == 0) continue;
     for (int r = 0; r < 31; ++r) if (b.rp_mask & (1u << r)) hist[r] += b.rp_hits;
+    exec_instr += b.rp_hits * (uint64_t) b.prefix_len;
+    exec_bytes += b.rp_hits * (uint64_t) b.rp_csz;
   }
+  // Execution-weighted code expansion -- the HOT path, not the cold-block-skewed static average.
+  // x86-instrs/instr ~= this / ~3.5; with cycles/instr from the throughput line -> hot-path IPC.
+  printf("[JIT][REGPROF][CPU%d] exec-weighted expansion: %.1f x86-bytes/instr (hot path)\n",
+         m_cpu_id, exec_instr ? (double) exec_bytes / (double) exec_instr : 0.0);
   char buf[256];
   int  len = snprintf(buf, sizeof(buf), "[JIT][REGPROF][CPU%d] hot GPRs (exec x accesses):", m_cpu_id);
   for (int rank = 0; rank < 8 && len < (int) sizeof(buf) - 24; ++rank) {

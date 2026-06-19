@@ -65,6 +65,7 @@ public:
 #ifdef JIT_REGPROF
     uint64_t rp_hits;     // REGPROF: block executions since record (body-entry inc -- counts chained runs)
     uint32_t rp_mask;     // REGPROF: Alpha GPRs touched by this block (bit r); compile-time, exec-weighted at report
+    uint32_t rp_csz;      // REGPROF: emitted x86 bytes for this block -- rp_hits x rp_csz = exec-weighted expansion
 #endif
   };
 
