@@ -157,6 +157,8 @@ private:
   uint64_t m_stat_native, m_stat_interp;        // windowed: instrs run native vs interpreted
   uint64_t m_stat_hot, m_stat_miss;             // windowed: compiled-chain dispatches, interp blocks
   uint64_t m_stat_compiled, m_stat_plen_sum;    // cumulative: compiled blocks, sum of their lengths
+  uint64_t m_stat_code_bytes;                   // cumulative: emitted x86 bytes (code expansion = /plen_sum)
+  uint64_t m_stat_wall_last_ns;                 // steady_clock ns at the last window report (throughput delta)
   uint64_t m_term_op[64];                       // cumulative: opcode that ended a block's compiled prefix
   uint64_t m_pal_func[256];                     // cumulative: CALL_PAL function code that ended a block
   uint64_t m_mtpr_func[256];                    // cumulative: HW_MTPR (0x1d) IPR index that ended a block

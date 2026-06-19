@@ -383,7 +383,9 @@ CJitEngine::CJitEngine(int cpu_id) : m_cpu_id(cpu_id), m_recorded(0), m_code_byt
 #endif
 #ifdef JIT_STATS
   m_stat_native = m_stat_interp = m_stat_hot = m_stat_miss = 0;
-  m_stat_compiled = m_stat_plen_sum = 0;
+  m_stat_compiled = m_stat_plen_sum = m_stat_code_bytes = 0;
+  m_stat_wall_last_ns = (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
   memset(m_term_op, 0, sizeof(m_term_op));
   memset(m_pal_func, 0, sizeof(m_pal_func));
   memset(m_mtpr_func, 0, sizeof(m_mtpr_func));
@@ -1952,6 +1954,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
 #ifdef JIT_STATS
   m_stat_compiled++;
   m_stat_plen_sum += plen;
+  m_stat_code_bytes += csz;
 #endif
 }
 
@@ -2028,6 +2031,16 @@ uint64_t CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr)
          m_cpu_id, 100.0 * (double) m_stat_native / (double) total,
          (unsigned long long) m_stat_native, (unsigned long long) total,
          chain, (unsigned long long) m_stat_hot, (unsigned long long) m_stat_miss);
+  // Throughput + code expansion: the in-JIT proxy for the codegen-quality diagnosis. MIPS is
+  // wall-clock (clock-independent: cycles/instr = host_GHz / MIPS); x86-bytes/instr is the static
+  // average emitted expansion. Read these off the WORKER CPU; the first window includes warmup.
+  const uint64_t now_ns = (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
+      stat_t0.time_since_epoch()).count();
+  const uint64_t dt_ns  = (now_ns > m_stat_wall_last_ns) ? now_ns - m_stat_wall_last_ns : 0;
+  const double   mips   = dt_ns ? (double) total * 1000.0 / (double) dt_ns : 0.0;
+  const double   expand = m_stat_plen_sum ? (double) m_stat_code_bytes / (double) m_stat_plen_sum : 0.0;
+  printf("[JIT][STATS][CPU%d] throughput %.0f MIPS (%llu instr / %.1f ms) | %.1f x86-bytes/instr (static avg)\n",
+         m_cpu_id, mips, (unsigned long long) total, (double) dt_ns / 1e6, expand);
   len = snprintf(buf, sizeof(buf), "[JIT][STATS][CPU%d] %llu recorded, %llu compiled (avg %.1f instr) | block-breakers:",
                  m_cpu_id, (unsigned long long) m_recorded, (unsigned long long) m_stat_compiled, avgpl);
   uint64_t hist[64];
@@ -2085,8 +2098,10 @@ uint64_t CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr)
            (unsigned long long) m_misc_func[0xf]);
   }
   m_stat_native = m_stat_interp = m_stat_hot = m_stat_miss = 0;   // reset the window
-  return (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
-           std::chrono::steady_clock::now() - stat_t0).count();
+  const auto stat_end = std::chrono::steady_clock::now();
+  m_stat_wall_last_ns = (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
+      stat_end.time_since_epoch()).count();   // next window's throughput delta starts after this I/O
+  return (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(stat_end - stat_t0).count();
 }
 #endif
 
