@@ -251,12 +251,13 @@ SafeOp classify(uint32_t ins, bool pal_block)
         case 0x4000: case 0x4400: return OP_MFENCE;  // MB, WMB
         case 0x8000: case 0xA000: case 0xE800:       // FETCH, FETCH_M, ECB
         case 0xF800: case 0xFC00: return OP_NOP;     // WH64, WH64EN
-        // RPCC/RC/RS read time-varying / consumed state into Ra -- compile the value-returning
-        // forms (Ra!=31) so the verify can log+replay the read; Ra==31 (no GPR dest; RC/RS still
-        // side-effect the flag) falls through to the interpreter.
+        // RPCC/RC/RS read time-varying / consumed state into Ra; the verify log+replays the read so the
+        // two passes agree. RC/RS also side-effect the soft-interrupt flag, so the Ra==31 (no GPR dest,
+        // flag-only) forms are compiled too -- the helper still runs, the store is skipped. RPCC Ra==31
+        // is a pure no-op read (nothing to replay), so it stays interpreted.
         case 0xC000: if (((ins >> 21) & 0x1f) != 31) return OP_RPCC; break;  // RPCC (cycle counter)
-        case 0xE000: if (((ins >> 21) & 0x1f) != 31) return OP_RC;   break;  // RC (read & clear flag)
-        case 0xF000: if (((ins >> 21) & 0x1f) != 31) return OP_RS;   break;  // RS (read & set flag)
+        case 0xE000: return OP_RC;   // RC (read & clear soft-intr flag); Ra==31 -> clear-only
+        case 0xF000: return OP_RS;   // RS (read & set soft-intr flag); Ra==31 -> set-only
       }
       break;
     case 0x00: {                // CALL_PAL: compile valid standard funcs (priv 0x00-0x3f, unpriv 0x80-0xbf)
@@ -1067,8 +1068,8 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     // pass's value in verify. Dest is Ra (not Rc); classify gated Ra!=31, so a store always happens.
     if (op == OP_RPCC || op == OP_RC || op == OP_RS) {
       const int sel = (op == OP_RPCC) ? 0 : (op == OP_RC) ? 1 : 2;
-      emit_call(misc_helper, { {JA_CPU, 0}, {JA_I32, (uint64_t) sel} });  // -> RAX = value (replayed in verify)
-      a.mov(reg(ra), x86::rax);                        // Ra = value (reg() applies the PALshadow remap)
+      emit_call(misc_helper, { {JA_CPU, 0}, {JA_I32, (uint64_t) sel} });  // -> RAX = value (replayed in verify); RC/RS also side-effect the flag
+      if (ra != 31) a.mov(reg(ra), x86::rax);          // Ra = value (reg() remap); Ra==31 RC/RS = flag side-effect only, discard
       continue;
     }
 

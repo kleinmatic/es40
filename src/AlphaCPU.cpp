@@ -870,11 +870,16 @@ void CAlphaCPU::jit_run(int budget)
 				// re-derive; the compiled forms pull their value from this same load log (jit_misc /
 				// jit_hw_mfpr replay it), so log them like loads.
 				const u32  miscfn    = (ins & 0xFFFF);
-				const bool is_miscrd = (opc == 0x18) && (miscfn == 0xC000 || miscfn == 0xE000 || miscfn == 0xF000);
+				// Compiled misc reads: RC/RS (0xE000/0xF000) for all Ra incl. 31 (the flag-only side-effect
+				// forms compile too); RPCC (0xC000) only when it has a GPR dest (Ra!=31).
+				const bool is_miscrd = (opc == 0x18) && (miscfn == 0xE000 || miscfn == 0xF000 || (miscfn == 0xC000 && lra != 31));
 				const bool is_isum   = (opc == 0x19) && (((ins >> 8) & 0xff) == 0x0d);   // ISUM: async interrupt-summary
 				const bool is_fpld   = (opc == 0x22 || opc == 0x23 || opc == 0x20 || opc == 0x21);   // LDS/LDT/LDF/LDG: dest is f[lra]
-				const bool isld = (opc == 0x28 || opc == 0x29 || opc == 0x0a || opc == 0x0c
-				                   || opc == 0x2a || opc == 0x2b || opc == 0x0b || is_hwld || is_miscrd || is_isum || is_fpld) && lra != 31;  // +LDBU/LDWU +LDx_L +LDQ_U +RPCC/RC/RS +ISUM +LDS/LDT
+				// Loads/ISUM/LDS/LDT only log when they have a dest (lra!=31); the misc reads are logged
+				// regardless -- a compiled RC/RS Ra==31 still consumes a replay slot, so keep the index in sync.
+				const bool isld = ((opc == 0x28 || opc == 0x29 || opc == 0x0a || opc == 0x0c
+				                    || opc == 0x2a || opc == 0x2b || opc == 0x0b || is_hwld || is_isum || is_fpld) && lra != 31)
+				                  || is_miscrd;  // +LDBU/LDWU +LDx_L +LDQ_U +RPCC/RC/RS +ISUM +LDS/LDT
 				u64 eva = 0;
 				if (isld && !is_miscrd && !is_isum)   // misc/ISUM reads have no effective address -- only a logged value
 				{
