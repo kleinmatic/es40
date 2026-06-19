@@ -78,6 +78,7 @@ enum SafeOp {
   OP_HW_LDL, OP_HW_LDQ,          // HW_LD (0x1b) physical func 0/1, PALmode only: Ra = phys[Rb+disp12]
   OP_HW_LDQ_VPTE,                // HW_LD (0x1b) func 5: virtual PTE fetch, access-checked vs KERNEL mode
   OP_HW_MTPR,                    // HW_MTPR (0x1d) side-effect-free IPRs, PALmode only: IPR[fn] = Rb
+  OP_HW_MTPR_TERM,               // HW_MTPR I_CTL (0x11): writes SDE/SPE/VA mode -> terminate, re-dispatch past it
   OP_HW_STL, OP_HW_STQ,          // HW_ST (0x1f) physical func 0/1, PALmode only: phys[Rb+disp12] = Ra
   OP_JMP,                        // JMP/JSR/RET (0x1a): Ra = PC+4; PC = Rb & ~3 (computed target)
   OP_HW_RET,                     // HW_RET (0x1e), PALmode: PC = Rb & ~2 (computed jump, the PAL return)
@@ -91,7 +92,7 @@ static inline bool is_branch(SafeOp op) { return op >= OP_BEQ && op <= OP_FBGE; 
 static inline bool is_fp_branch(SafeOp op) { return op >= OP_FBEQ && op <= OP_FBGE; }
 static inline bool is_store(SafeOp op)  { return op == OP_STQ || op == OP_STL; }
 // A terminator ends the block and writes its own next PC (branches + the computed jump).
-static inline bool is_terminator(SafeOp op) { return op == OP_JMP || op == OP_HW_RET || op == OP_CALL_PAL || is_branch(op); }
+static inline bool is_terminator(SafeOp op) { return op == OP_JMP || op == OP_HW_RET || op == OP_CALL_PAL || op == OP_HW_MTPR_TERM || is_branch(op); }
 
 // POPCNT isn't baseline x86-64 (pre-2008 CPUs lack it); query the host once. CTLZ/CTTZ use
 // baseline BSR/BSF, so only CTPOP is gated -- it stays interpreted when the host lacks POPCNT.
@@ -292,9 +293,9 @@ SafeOp classify(uint32_t ins, bool pal_block)
     }
     case 0x1d: {                // HW_MTPR (PALmode): compile the pure-store IPRs, the TB fills
       // (idempotent add_tb_i/_d), IER (field stores + check_int kick), the ITB invalidates (idempotent
-      // tbia/tbiap/tbis -> note_itb_invalidate), and IC_FLUSH (lazy flush; reclaim deferred off the
-      // compiled frame). DTB invalidates (dpc coherence), CM, SIRR/HW_INT_CLR, PAL_BASE, i_ctl, the
-      // 0x40-7f group stay interpreted.
+      // tbia/tbiap/tbis -> note_itb_invalidate), IC_FLUSH (lazy flush; reclaim deferred off the
+      // compiled frame), and I_CTL (terminator: writes SDE/SPE/VA mode, so re-dispatch past it). DTB
+      // invalidates (dpc coherence), CM, SIRR/HW_INT_CLR, PAL_BASE, the 0x40-7f group stay interpreted.
       if (!pal_block) return OP_NONE;
       switch ((ins >> 8) & 0xff) {
         case 0x00: case 0x14: case 0x20: case 0x26:   // ITB_TAG, PCTR_CTL, DTB_TAG0, DTB_ALTMODE
@@ -304,6 +305,8 @@ SafeOp classify(uint32_t ins, bool pal_block)
         case 0x13:                                    // IC_FLUSH (lazy gen-bump flush; reclaim deferred off-frame)
         case 0x0a:                                    // IER (interrupt enables + check_int kick)
           return OP_HW_MTPR;
+        case 0x11:                                    // I_CTL: changes SDE (shadow remap)/SPE/VA mode -> terminate
+          return OP_HW_MTPR_TERM;
         case 0x15: case 0x17: case 0x27:              // CLR_MAP, SLEEP, MM_STAT (no-ops)
         case 0x2b: case 0x2c: case 0x2d:              // C_DATA, C_SHIFT, M_FIX (no-ops)
           return OP_NOP;
@@ -997,6 +1000,17 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     if (op == OP_HW_MTPR) {
       const uint32_t function = (ins >> 8) & 0xff;
       emit_call(hw_mtpr_helper, { {JA_CPU, 0}, {JA_I32, (uint64_t) function}, {JA_GPZ, (uint64_t) rb} });  // jit_hw_mtpr(cpu, function, value)
+      continue;
+    }
+
+    // HW_MTPR I_CTL (0x11), terminator: I_CTL writes SDE (the PALshadow R4-7/R20-23 remap), SPE and
+    // VA mode -- assumptions the reg() remap and the MMU bake in -- so compiled code PAST it would be
+    // wrong. Run the IPR write via the same helper, then end the block: set the next PC and re-dispatch,
+    // so post-I_CTL code recompiles under the new SDE. 
+    if (op == OP_HW_MTPR_TERM) {
+      const uint32_t function = (ins >> 8) & 0xff;            // 0x11 (I_CTL)
+      emit_call(hw_mtpr_helper, { {JA_CPU, 0}, {JA_I32, (uint64_t) function}, {JA_GPZ, (uint64_t) rb} });
+      set_pc(b->tag + 4 * (uint64_t) (i + 1));                // next PC -> R10 + state.pc (PALmode bit preserved)
       continue;
     }
 

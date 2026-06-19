@@ -978,6 +978,9 @@ void CAlphaCPU::jit_run(int budget)
 					d[10] = (u64) (u32) state.cren; d[11] = (u64) (u32) state.slen; d[12] = (u64) (u32) state.eien;
 					d[13] = state.exc_sum;   // FPSTART clears it (compiled ITOFx/FTOIx/FLTL)
 					d[14] = state.fpcr;      // MT_FPCR (compiled FLTL) writes it
+					d[15] = (u64) state.sde; d[16] = (u64) state.hwe;            // I_CTL (compiled as terminator)
+					d[17] = (u64) (u32) state.i_ctl_spe; d[18] = (u64) (u32) state.i_ctl_va_mode;
+					d[19] = state.i_ctl_vptb; d[20] = state.i_ctl_other;
 				};
 				auto put_iprs = [&](const u64* s) {
 					state.last_tb_virt = s[0]; last_dtb_virt[0] = s[1]; last_dtb_virt[1] = s[2];
@@ -986,8 +989,11 @@ void CAlphaCPU::jit_run(int budget)
 					state.cren = (int) s[10]; state.slen = (int) s[11]; state.eien = (int) s[12];
 					state.exc_sum = s[13];
 					state.fpcr = s[14];
+					state.sde = (bool) s[15]; state.hwe = (bool) s[16];
+					state.i_ctl_spe = (int) s[17]; state.i_ctl_va_mode = (int) s[18];
+					state.i_ctl_vptb = s[19]; state.i_ctl_other = s[20];
 				};
-				u64 ipr_interp[15];
+				u64 ipr_interp[21];
 				cap_iprs(ipr_interp);
 				// FP file: compiled ITOFx writes state.f live (like the IPR writes); snapshot the
 				// interp pass's result, compare after the compiled pass, then restore.
@@ -1023,9 +1029,9 @@ void CAlphaCPU::jit_run(int budget)
 						       (unsigned long long) state.r[2], (unsigned long long) jr[2],
 						       (unsigned long long) snap[5]);
 					}
-					u64 ipr_jit[15];
+					u64 ipr_jit[21];
 					cap_iprs(ipr_jit);   // compiled pass wrote IPRs into live state; check vs interp
-					for (int ii = 0; ii < 15; ii++) if (ipr_jit[ii] != ipr_interp[ii])
+					for (int ii = 0; ii < 21; ii++) if (ipr_jit[ii] != ipr_interp[ii])
 						printf("[JIT][VERIFY] IPR MISMATCH at %016llx slot %d: interp=%016llx jit=%016llx\n",
 						       (unsigned long long) start_virt, ii,
 						       (unsigned long long) ipr_interp[ii], (unsigned long long) ipr_jit[ii]);
@@ -1684,6 +1690,14 @@ void CAlphaCPU::jit_hw_mtpr(CAlphaCPU* cpu, u32 function, u64 value)
 		cpu->state.slen  = (int) (value >> 32) & 1;
 		cpu->state.eien  = (int) (value >> 33) & 0x3f;
 		cpu->state.check_int = true;                       // newly enabled pending ints must be polled
+		break;
+	case 0x11:                                                                   // I_CTL (terminator; mirrors DO_HW_MTPR)
+		cpu->state.i_ctl_other   = (value & U64(0x00000000006e2f67)) | U64(0x0000000000100000);  // bit 20 hardwired-on (EV6/EV68)
+		cpu->state.i_ctl_vptb    = sext_u64_48(value & U64(0x0000ffffc0000000));
+		cpu->state.i_ctl_spe     = (int) ((value >> 3) & 7);
+		cpu->state.sde           = (value >> 7) & 1;
+		cpu->state.hwe           = (value >> 12) & 1;
+		cpu->state.i_ctl_va_mode = (int) (value >> 15) & 3;
 		break;
 	case 0x14: cpu->state.pctr_ctl = value & U64(0xffffffffffffffdf); break;     // PCTR_CTL
 	case 0x20: cpu->last_dtb_virt[0] = value; break;                             // DTB_TAG0
