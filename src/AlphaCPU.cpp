@@ -1032,7 +1032,7 @@ void CAlphaCPU::jit_run(int budget)
 						printf("[JIT][VERIFY] FP MISMATCH at %016llx f%d: interp=%016llx jit=%016llx\n",
 						       (unsigned long long) start_virt, fi,
 						       (unsigned long long) f_interp[fi], (unsigned long long) state.f[fi]);
-					m_jit->verify_compare(start_virt, state.r, jr, vw, b->prefix_len);
+					cc_last_sync += std::chrono::nanoseconds(m_jit->verify_compare(start_virt, state.r, jr, vw, b->prefix_len));   // don't bill the progress-print stall to RPCC
 				}
 				state.pc = interp_pc;   // restore; the block's PC write was only for the check
 				put_iprs(ipr_interp);   // roll back the compiled pass's live IPR writes (verify-only)
@@ -1671,6 +1671,9 @@ void CAlphaCPU::jit_hw_mtpr(CAlphaCPU* cpu, u32 function, u64 value)
 	{
 	case 0x00: cpu->state.last_tb_virt = value; break;                          // ITB_TAG
 	case 0x01: cpu->add_tb_i(cpu->state.last_tb_virt, value); break;            // ITB_PTE (ITB fill)
+	case 0x02: cpu->tbiap(ACCESS_EXEC); break;                                  // ITB_IAP (process ITB invalidate)
+	case 0x03: cpu->tbia(ACCESS_EXEC); break;                                   // ITB_IA (invalidate all ITB)
+	case 0x04: cpu->tbis(value, ACCESS_EXEC); break;                            // ITB_IS (single ITB invalidate)
 	case 0x0a:                                                                   // IER
 		cpu->state.asten = (int) (value >> 13) & 1;
 		cpu->state.sien  = (int) (value >> 13) & 0xfffe;

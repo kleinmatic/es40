@@ -291,13 +291,15 @@ SafeOp classify(uint32_t ins, bool pal_block)
       return OP_NONE;
     }
     case 0x1d: {                // HW_MTPR (PALmode): compile the pure-store IPRs, the TB fills
-      // (idempotent forwards to add_tb_i/_d) and IER (field stores + check_int kick). TB/cache
-      // flushes, CM writes, SIRR/HW_INT_CLR, PAL_BASE, i_ctl, the 0x40-7f group stay interpreted.
+      // (idempotent add_tb_i/_d), IER (field stores + check_int kick), and the ITB invalidates
+      // (idempotent tbia/tbiap/tbis -> note_itb_invalidate). DTB invalidates (dpc coherence),
+      // IC_FLUSH, CM, SIRR/HW_INT_CLR, PAL_BASE, i_ctl, the 0x40-7f group stay interpreted.
       if (!pal_block) return OP_NONE;
       switch ((ins >> 8) & 0xff) {
         case 0x00: case 0x14: case 0x20: case 0x26:   // ITB_TAG, PCTR_CTL, DTB_TAG0, DTB_ALTMODE
         case 0x29: case 0xa0: case 0xc0:              // DC_CTL, DTB_TAG1, CC
         case 0x01: case 0x21: case 0xa1:              // ITB_PTE, DTB_PTE0, DTB_PTE1 (TB fills)
+        case 0x02: case 0x03: case 0x04:              // ITB_IAP, ITB_IA, ITB_IS (idempotent ITB invalidates)
         case 0x0a:                                    // IER (interrupt enables + check_int kick)
           return OP_HW_MTPR;
         case 0x15: case 0x17: case 0x27:              // CLR_MAP, SLEEP, MM_STAT (no-ops)
@@ -1835,8 +1837,8 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
 }
 
 #ifdef JIT_VERIFY
-void CJitEngine::verify_compare(uint64_t blk_virt, const uint64_t* interp, const uint64_t* jit,
-                                const uint32_t* words, uint32_t nwords)
+uint64_t CJitEngine::verify_compare(uint64_t blk_virt, const uint64_t* interp, const uint64_t* jit,
+                                    const uint32_t* words, uint32_t nwords)
 {
   m_v_exec++;
   for (int r = 0; r < 63; ++r) {   // r0..r30 main bank + r32..r62 PALshadow bank
@@ -1852,9 +1854,14 @@ void CJitEngine::verify_compare(uint64_t blk_virt, const uint64_t* interp, const
       break;
     }
   }
-  if ((m_v_exec % 500000) == 0)
-    printf("[JIT][VERIFY] %llu compiled-block execs, %llu mismatches\n",
+  if ((m_v_exec % 500000) == 0) {
+    const auto t0 = std::chrono::steady_clock::now();   // exclude this print's I/O stall from the
+    printf("[JIT][VERIFY] %llu compiled-block execs, %llu mismatches\n",   // wall-clock-pinned RPCC
            (unsigned long long) m_v_exec, (unsigned long long) m_v_fail);
+    return (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now() - t0).count();
+  }
+  return 0;
 }
 #endif
 

@@ -106,9 +106,11 @@ public:
   inline uint64_t vgen() const          { return m_itb_gen + m_flush_gen; }   // combined validation epoch
 
 #ifdef JIT_VERIFY
-  // Differential check: compiled result (jit) vs interpreter result (interp), r[0..30].
-  void verify_compare(uint64_t blk_virt, const uint64_t* interp, const uint64_t* jit,
-                      const uint32_t* words, uint32_t nwords);
+  // Differential check: compiled result (jit) vs interpreter result (interp), r[0..30]. Returns the
+  // ns spent in its periodic progress printf (0 otherwise) so the dispatcher can exclude that stall
+  // from the wall-clock-pinned RPCC (same Heisenberg fix as note_exec).
+  uint64_t verify_compare(uint64_t blk_virt, const uint64_t* interp, const uint64_t* jit,
+                          const uint32_t* words, uint32_t nwords);
 #endif
 
 #ifdef JIT_STATS
