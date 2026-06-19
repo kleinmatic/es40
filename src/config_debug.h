@@ -180,6 +180,10 @@
 // (ES40_JIT builds only). Measure with JIT_VERIFY off.
 //#define JIT_STATS
 
+// Define to profile most frequently used registers in the Alpha CPU emulation. 
+// ES40_JIT builds only, Requires JIT_STATS.
+//#define JIT_REGPROF
+
 // Define to dump each compiled block's emitted x86-64 disassembly,
 // validate every emitted instruction, and trap silent emit failures via an error handler.
 // VERY NOISY, and validation adds runtime cost (ES40_JIT builds only).

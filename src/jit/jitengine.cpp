@@ -672,19 +672,29 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   const uint8_t* gpa = cc.passed_order(RegGroup::kGp);
   auto aq = [&](int i) { return x86::gpq(gpa[i]); };
   auto ad = [&](int i) { return x86::gpd(gpa[i]); };
-  // cpu (RBP), regs (RBX) and the chain counter (R14) live across helper calls, so they must
-  // be callee-saved under the host ABI. Verified at dev time (compiled out in NDEBUG builds).
+  // cpu (RBP), regs (RBX), the chain counter (R14) and the basic Alpha-GPR pins (R12/R13/R15)
+  // all hold live values across helper calls, so they must be callee-saved under the host ABI.
+  // Verified at dev time (compiled out in NDEBUG builds).
   [[maybe_unused]] const uint32_t kPinnedGp =
-      (1u << x86::rbp.id()) | (1u << x86::rbx.id()) | (1u << x86::r14.id());
+      (1u << x86::rbp.id()) | (1u << x86::rbx.id()) | (1u << x86::r14.id())
+    | (1u << x86::r12.id()) | (1u << x86::r13.id()) | (1u << x86::r15.id());
   assert((((uint32_t) cc.preserved_regs(RegGroup::kGp)) & kPinnedGp) == kPinnedGp);
 
   a.push(x86::rbx);
   a.push(x86::rbp);
   a.push(x86::r14);            // callee-saved: accumulates the chain's instruction count
-  a.sub(x86::rsp, imm(48));    // 32 shadow + load-out slot; keeps RSP 16-aligned at calls
+  a.push(x86::r12);            // callee-saved: pin for Alpha R26 (RA)
+  a.push(x86::r13);            // callee-saved: pin for Alpha R16 (a0)
+  a.push(x86::r15);            // callee-saved: pin for Alpha R27 (PV)
+  a.sub(x86::rsp, imm(40));    // 32 shadow + load-out slot; 6 pushes -> 40 keeps RSP 16-aligned at calls
   a.mov(x86::rbp, aq(0));      // cpu  (arg 0)
   a.mov(x86::rbx, aq(1));      // regs (arg 1)
   a.xor_(x86::r14d, x86::r14d);   // instruction count := 0
+  // Load the global pins from regs[] on cold entry. Chained re-entry jumps to `body` below,
+  // skipping this -- the pins stay live in x86 across the whole chain, synced back at `done`.
+  a.mov(x86::r12, x86::qword_ptr(x86::rbx, 26 * 8));   // R26 (RA)
+  a.mov(x86::r13, x86::qword_ptr(x86::rbx, 16 * 8));   // R16 (a0)
+  a.mov(x86::r15, x86::qword_ptr(x86::rbx, 27 * 8));   // R27 (PV)
 
   Label done = a.new_label();  // shared exit: restore frame + ret (EAX preset by caller)
   Label body = a.new_label();  // chained re-entry (after the prologue; preserves R14)
@@ -700,6 +710,19 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   auto set_pc = [&](uint64_t pc_val) {
     a.mov(x86::r10, imm(pc_val));
     a.mov(x86::qword_ptr(x86::rbp, m_off.state_pc), x86::r10);
+  };
+
+  // basic global register pins (JIT_REGPROF data: R26=RA, R16=a0, R27=PV dominate the
+  // call-heavy hot path). Each maps to a callee-saved x86 reg free under both Win64 and SysV
+  // (R12/R13/R15; see kPinnedGp). pin_id(r) -> the x86 reg id, or -1 if r isn't pinned.
+  // Returning -1 for all (the kill-switch) reverts every access site to the regs[] memory path.
+  auto pin_id = [&](int r) -> int {
+    switch (r) {
+      case 26: return (int) x86::r12.id();
+      case 16: return (int) x86::r13.id();
+      case 27: return (int) x86::r15.id();
+      default: return -1;
+    }
   };
 
   for (uint32_t i = 0; i < plen; ++i) {
@@ -728,14 +751,33 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       int idx = (pal_block && ((r & 0xc) == 0x4)) ? r + 32 : r;
       return x86::dword_ptr(x86::rbx, idx * 8);
     };
+    // Pin-aware reg access: route through the pinned x86 reg when r is pinned, else the regs[]
+    // memory slot via reg()/reg32(). Callers handle r==31 (it varies per site: 0, a displacement,
+    // or skip). mov_to_reg writes the slot for any non-pinned r (R31 included, matching the old
+    // unconditional stores -- nothing reads r[31] back).
+    auto mov_from_reg = [&](const x86::Gp& dst, int r) {        // dst is 64-bit
+      int p = pin_id(r);
+      if (p >= 0) a.mov(dst, x86::gpq((uint32_t) p));
+      else        a.mov(dst, reg(r));
+    };
+    auto mov_from_reg32 = [&](const x86::Gp& dst, int r) {      // dst is 32-bit
+      int p = pin_id(r);
+      if (p >= 0) a.mov(dst, x86::gpd((uint32_t) p));
+      else        a.mov(dst, reg32(r));
+    };
+    auto mov_to_reg = [&](int r, const x86::Gp& src) {          // src is 64-bit
+      int p = pin_id(r);
+      if (p >= 0) a.mov(x86::gpq((uint32_t) p), src);
+      else        a.mov(reg(r), src);
+    };
     auto op1_rax = [&]() {
       if (ra == 31) a.xor_(x86::eax, x86::eax);
-      else          a.mov(x86::rax, reg(ra));
+      else          mov_from_reg(x86::rax, ra);
     };
     auto op2_rcx = [&]() {                  // operand2 (literal, or r[Rb] with r31=0)
       if (islit)         a.mov(x86::rcx, imm(lit));
       else if (rb == 31) a.xor_(x86::ecx, x86::ecx);
-      else               a.mov(x86::rcx, reg(rb));
+      else               mov_from_reg(x86::rcx, rb);
     };
 
     // ABI-native helper call.
@@ -748,9 +790,9 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       auto place = [&](int k, const JitArg& s) {
         switch (s.k) {
           case JA_CPU: a.mov(aq(k), x86::rbp);                              break;  // cpu
-          case JA_GP:  a.mov(aq(k), reg((int) s.v));                        break;  // r[v]
+          case JA_GP:  mov_from_reg(aq(k), (int) s.v);                      break;  // r[v]
           case JA_GPZ: if (s.v == 31) a.xor_(ad(k), ad(k));                         // r[v], or 0 if R31
-                       else           a.mov(aq(k), reg((int) s.v));         break;
+                       else           mov_from_reg(aq(k), (int) s.v);       break;
           case JA_VA:  if (aq(k).id() != x86::rdx.id()) a.mov(aq(k), x86::rdx); break;  // va: precomputed in RDX
           case JA_OUT: a.lea(aq(k), x86::qword_ptr(x86::rsp, 32));          break;  // &out slot
           case JA_R10: a.mov(aq(k), x86::r10);                             break;  // value already in R10
@@ -771,7 +813,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       const int size_bits = (op == OP_LDQ || op == OP_LDQ_U) ? 64 : (op == OP_LDL) ? 32 : (op == OP_LDWU) ? 16 : 8;
       const int amask = (size_bits / 8) - 1;
       if (rb == 31)  a.mov(x86::rdx, imm(disp));         // va -> RDX
-      else        {  a.mov(x86::rdx, reg(rb)); if (disp) a.add(x86::rdx, imm(disp)); }
+      else        {  mov_from_reg(x86::rdx, rb); if (disp) a.add(x86::rdx, imm(disp)); }
       if (op == OP_LDQ_U) a.and_(x86::rdx, imm(~(uint64_t) 7));   // LDQ_U: force 8-byte alignment
 
       // Slow path: jit_read(cpu, va, size, &out); on fault bail to `done` returning i
@@ -791,7 +833,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
         else if (op == OP_LDL)  a.movsxd(x86::rax, x86::dword_ptr(x86::rsp, 32));
         else if (op == OP_LDWU) a.movzx(x86::eax, x86::word_ptr(x86::rsp, 32));   // BWX: zero-extend
         else                    a.movzx(x86::eax, x86::byte_ptr(x86::rsp, 32));   // LDBU
-        a.mov(reg(ra), x86::rax);
+        mov_to_reg(ra, x86::rax);
       };
 
 #ifdef JIT_VERIFY
@@ -825,7 +867,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       else if (op == OP_LDL)  a.movsxd(x86::rax, x86::dword_ptr(x86::r10, x86::rax));
       else if (op == OP_LDWU) a.movzx(x86::eax, x86::word_ptr(x86::r10, x86::rax));   // BWX: zero-extend
       else                    a.movzx(x86::eax, x86::byte_ptr(x86::r10, x86::rax));   // LDBU
-      a.mov(reg(ra), x86::rax);
+      mov_to_reg(ra, x86::rax);
       a.jmp(ldone);
       a.bind(slow);
       emit_helper();
@@ -843,7 +885,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       const int size_bits = (op == OP_STQ || op == OP_STQ_U) ? 64 : (op == OP_STL) ? 32 : (op == OP_STW) ? 16 : 8;
       const int amask = (size_bits / 8) - 1;
       if (rb == 31)  a.mov(x86::rdx, imm(disp));                       // va -> RDX (preserved for helper)
-      else        {  a.mov(x86::rdx, reg(rb)); if (disp) a.add(x86::rdx, imm(disp)); }
+      else        {  mov_from_reg(x86::rdx, rb); if (disp) a.add(x86::rdx, imm(disp)); }
       if (op == OP_STQ_U) a.and_(x86::rdx, imm(~(uint64_t) 7));        // STQ_U: force 8-byte alignment
 
       auto emit_helper = [&]() {
@@ -885,7 +927,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       a.or_(x86::rax, x86::r10);                                        // rax = phys
       a.cmp(x86::rax, x86::qword_ptr(x86::rbp, m_off.dram_size));       a.jae(slow);
       if (ra == 31)  a.xor_(x86::r9d, x86::r9d);                        // value -> R9 (R31 == 0)
-      else           a.mov(x86::r9, reg(ra));
+      else           mov_from_reg(x86::r9, ra);
       a.mov(x86::r10, x86::qword_ptr(x86::rbp, m_off.dram_ptr));
       if      (op == OP_STQ || op == OP_STQ_U) a.mov(x86::qword_ptr(x86::r10, x86::rax), x86::r9);   // full quad
       else if (op == OP_STL)                   a.mov(x86::dword_ptr(x86::r10, x86::rax), x86::r9d);
@@ -917,7 +959,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       if (isload && fa == 31) continue;   // LDT/LDS f31: interp skips the read (NOP)
 
       if (rb == 31)  a.mov(x86::rdx, imm(disp));                       // va -> RDX (preserved for helper)
-      else        {  a.mov(x86::rdx, reg(rb)); if (disp) a.add(x86::rdx, imm(disp)); }
+      else        {  mov_from_reg(x86::rdx, rb); if (disp) a.add(x86::rdx, imm(disp)); }
 
       auto emit_helper = [&]() {
         emit_call(isload ? fp_read_helper : fp_write_helper,
@@ -985,7 +1027,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       const int disp = (int) (int16_t) (ins & 0xFFFF);
       const int size_bits = (op == OP_STQ_C) ? 64 : 32;
       if (rb == 31)  a.mov(x86::rdx, imm(disp));                       // va -> RDX
-      else        {  a.mov(x86::rdx, reg(rb)); if (disp) a.add(x86::rdx, imm(disp)); }
+      else        {  mov_from_reg(x86::rdx, rb); if (disp) a.add(x86::rdx, imm(disp)); }
       emit_call(stc_helper, { {JA_CPU, 0}, {JA_VA, 0}, {JA_I32, (uint64_t) size_bits}, {JA_GP, (uint64_t) ra} });  // jit_stc(cpu, va, size, value)
       Label nobail = a.new_label();
       a.test(x86::eax, imm(0x100));                                   // 0x100 = translation-fault bail
@@ -995,7 +1037,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       a.add(x86::eax, x86::r14d);
       a.jmp(done);
       a.bind(nobail);
-      a.mov(reg(ra), x86::rax);                                       // Ra = success(1) / fail(0)
+      mov_to_reg(ra, x86::rax);                                      // Ra = success(1) / fail(0)
       continue;
     }
 
@@ -1007,7 +1049,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       const int disp = (int) ((int32_t) (ins << 20) >> 20);    // sign-extend 12-bit displacement
       const int size_bits = (op == OP_HW_LDL) ? 32 : 64;
       if (rb == 31)  a.mov(x86::rdx, imm(disp));               // address (phys, or virtual for VPTE) -> RDX
-      else        {  a.mov(x86::rdx, reg(rb)); if (disp) a.add(x86::rdx, imm(disp)); }
+      else        {  mov_from_reg(x86::rdx, rb); if (disp) a.add(x86::rdx, imm(disp)); }
       // func 5 -> jit_read_vpte (kernel-checked virtual read); else jit_read_phys
       emit_call(op == OP_HW_LDQ_VPTE ? read_vpte_helper : hw_ld_helper,
                 { {JA_CPU, 0}, {JA_VA, 0}, {JA_I32, (uint64_t) size_bits}, {JA_OUT, 0} });
@@ -1021,7 +1063,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       a.bind(ok);
       if (op == OP_HW_LDL) a.movsxd(x86::rax, x86::dword_ptr(x86::rsp, 32));
       else                 a.mov(x86::rax, x86::qword_ptr(x86::rsp, 32));   // HW_LDQ / VPTE: full quad
-      a.mov(reg(ra), x86::rax);
+      mov_to_reg(ra, x86::rax);
       continue;
     }
 
@@ -1031,7 +1073,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       const int disp = (int) (int16_t) (ins & 0xFFFF);
       const int size_bits = (op == OP_LDQ_L) ? 64 : 32;
       if (rb == 31)  a.mov(x86::rdx, imm(disp));               // va -> RDX
-      else        {  a.mov(x86::rdx, reg(rb)); if (disp) a.add(x86::rdx, imm(disp)); }
+      else        {  mov_from_reg(x86::rdx, rb); if (disp) a.add(x86::rdx, imm(disp)); }
       emit_call(read_locked_helper, { {JA_CPU, 0}, {JA_VA, 0}, {JA_I32, (uint64_t) size_bits}, {JA_OUT, 0} });  // jit_read_locked(cpu, va, size, &out)
       Label ok = a.new_label();
       a.test(x86::eax, x86::eax);
@@ -1042,7 +1084,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       a.jmp(done);
       a.bind(ok);
       a.mov(x86::rax, x86::qword_ptr(x86::rsp, 32));           // *out already sign-extended by the helper
-      a.mov(reg(ra), x86::rax);
+      mov_to_reg(ra, x86::rax);
       continue;
     }
 
@@ -1072,7 +1114,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       const int disp = (int) ((int32_t) (ins << 20) >> 20);    // sign-extend 12-bit displacement
       const int size_bits = (op == OP_HW_STQ) ? 64 : 32;
       if (rb == 31)  a.mov(x86::rdx, imm(disp));               // phys addr -> RDX
-      else        {  a.mov(x86::rdx, reg(rb)); if (disp) a.add(x86::rdx, imm(disp)); }
+      else        {  mov_from_reg(x86::rdx, rb); if (disp) a.add(x86::rdx, imm(disp)); }
       emit_call(hw_st_helper, { {JA_CPU, 0}, {JA_VA, 0}, {JA_I32, (uint64_t) size_bits}, {JA_GPZ, (uint64_t) ra} });  // jit_write_phys(cpu, phys, size, value)
       Label ok = a.new_label();
       a.test(x86::eax, x86::eax);
@@ -1092,8 +1134,8 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       int64_t d = (int64_t) (int16_t) (ins & 0xFFFF);
       if (op == OP_LDAH) d <<= 16;
       if (rb == 31)  a.mov(x86::rax, imm(d));
-      else        {  a.mov(x86::rax, reg(rb)); if (d) a.add(x86::rax, imm(d)); }
-      a.mov(reg(ra), x86::rax);
+      else        {  mov_from_reg(x86::rax, rb); if (d) a.add(x86::rax, imm(d)); }
+      mov_to_reg(ra, x86::rax);
       continue;
     }
 
@@ -1105,7 +1147,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     if (op == OP_HW_MFPR) {
       if (ra != 31) {                                  // MFPR R31 discards the value (R31 is hardwired 0)
         emit_call(hw_mfpr_helper, { {JA_CPU, 0}, {JA_I32, (uint64_t) ins}, {JA_GP, (uint64_t) ra} });  // -> RAX = IPR value
-        a.mov(reg(ra), x86::rax);                      // Ra = value (reg() applies the PALshadow remap)
+        mov_to_reg(ra, x86::rax);                      // Ra = value (reg() applies the PALshadow remap)
       }
       continue;
     }
@@ -1116,7 +1158,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     if (op == OP_RPCC || op == OP_RC || op == OP_RS) {
       const int sel = (op == OP_RPCC) ? 0 : (op == OP_RC) ? 1 : 2;
       emit_call(misc_helper, { {JA_CPU, 0}, {JA_I32, (uint64_t) sel} });  // -> RAX = value (replayed in verify); RC/RS also side-effect the flag
-      if (ra != 31) a.mov(reg(ra), x86::rax);          // Ra = value (reg() remap); Ra==31 RC/RS = flag side-effect only, discard
+      if (ra != 31) mov_to_reg(ra, x86::rax);          // Ra = value (reg() remap); Ra==31 RC/RS = flag side-effect only, discard
       continue;
     }
 
@@ -1149,7 +1191,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       a.jmp(done);
       a.bind(ok);
       a.mov(x86::rax, x86::qword_ptr(x86::rsp, 32));
-      a.mov(reg(rc), x86::rax);                        // Rc (reg() applies the PALshadow remap)
+      mov_to_reg(rc, x86::rax);                        // Rc (reg() applies the PALshadow remap)
       continue;
     }
 
@@ -1471,10 +1513,10 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     if (op == OP_JMP) {
       const uint64_t ret = b->tag + 4 * (uint64_t) (i + 1);
       if (rb == 31) a.xor_(x86::r10d, x86::r10d);
-      else          a.mov(x86::r10, reg(rb));
+      else          mov_from_reg(x86::r10, rb);
       a.and_(x86::r10, imm(~(uint64_t) 3));                       // target = Rb & ~3 (clear low 2)
       if (b->tag & 3) a.or_(x86::r10, imm(b->tag & 3));           // DO_JMP: mode bits come from the current pc
-      if (ra != 31) { a.mov(x86::rax, imm(ret & ~(uint64_t) 3)); a.mov(reg(ra), x86::rax); }  // return addr = PC & ~3 (DO_JMP)
+      if (ra != 31) { a.mov(x86::rax, imm(ret & ~(uint64_t) 3)); mov_to_reg(ra, x86::rax); }  // return addr = PC & ~3 (DO_JMP)
       a.mov(x86::qword_ptr(x86::rbp, m_off.state_pc), x86::r10);  // state.pc = target
       continue;
     }
@@ -1483,7 +1525,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     // address write. Like OP_JMP, leaves R10 = target for the epilogue's in-frame chain.
     if (op == OP_HW_RET) {
       if (rb == 31) a.xor_(x86::r10d, x86::r10d);
-      else          a.mov(x86::r10, reg(rb));
+      else          mov_from_reg(x86::r10, rb);
       a.and_(x86::r10, imm(~(uint64_t) 2));                       // target = Rb & ~2 (clear bit 1)
       a.mov(x86::qword_ptr(x86::rbp, m_off.state_pc), x86::r10);  // state.pc = target
       continue;
@@ -1567,11 +1609,11 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       const uint64_t fall  = b->tag + 4 * (uint64_t) (i + 1);
       const uint64_t tgt   = fall + (uint64_t) (bdisp * 4);
       if (op == OP_BR || op == OP_BSR) {                 // Ra = return address; PC = target
-        if (ra != 31) { a.mov(x86::r10, imm(fall & ~(uint64_t) 3)); a.mov(reg(ra), x86::r10); }  // link = PC & ~3 (DO_BR)
+        if (ra != 31) { a.mov(x86::r10, imm(fall & ~(uint64_t) 3)); mov_to_reg(ra, x86::r10); }  // link = PC & ~3 (DO_BR)
         a.mov(x86::r10, imm(tgt));
       } else {                                           // conditional: PC = cond ? target : fall
         if (ra == 31) a.xor_(x86::eax, x86::eax);
-        else          a.mov(x86::rax, reg(ra));
+        else          mov_from_reg(x86::rax, ra);
         a.mov(x86::r10, imm(fall));
         a.mov(x86::r11, imm(tgt));
         if (op == OP_BLBC || op == OP_BLBS) a.test(x86::rax, imm(1));
@@ -1600,7 +1642,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       const uint32_t f = (ins >> 5) & 0x7f;
       op1_rax();                                  // rax = Ra (condition operand)
       op2_rcx();                                  // rcx = op2 (Rb or literal -- the moved value)
-      a.mov(x86::r10, reg(rc));                   // r10 = current Rc (kept when the condition fails)
+      mov_from_reg(x86::r10, rc);                 // r10 = current Rc (kept when the condition fails)
       if (f == 0x14 || f == 0x16) a.test(x86::rax, imm(1));    // CMOVLBS/LBC: test the low bit
       else                        a.test(x86::rax, x86::rax);  // others: test the full value
       switch (f) {
@@ -1613,7 +1655,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
         case 0x14: a.cmovnz(x86::r10, x86::rcx); break;   // CMOVLBS (Ra & 1)
         case 0x16: a.cmovz(x86::r10, x86::rcx);  break;   // CMOVLBC (!(Ra & 1))
       }
-      a.mov(reg(rc), x86::r10);
+      mov_to_reg(rc, x86::r10);
       continue;
     }
 
@@ -1675,7 +1717,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
           break;
         default: break;
       }
-      a.mov(reg(rc), x86::rax);
+      mov_to_reg(rc, x86::rax);
       continue;
     }
 
@@ -1693,10 +1735,10 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       case OP_MULL:                                          // 32-bit multiply, low 32 sign-extended
       {
         if (ra == 31) a.xor_(x86::eax, x86::eax);
-        else          a.mov(x86::eax, reg32(ra));
+        else          mov_from_reg32(x86::eax, ra);
         if (islit)         a.mov(x86::ecx, imm(lit));
         else if (rb == 31) a.xor_(x86::ecx, x86::ecx);
-        else               a.mov(x86::ecx, reg32(rb));
+        else               mov_from_reg32(x86::ecx, rb);
         a.imul(x86::eax, x86::ecx);                          // eax = (Ra*op2)[31:0]
         a.movsxd(x86::rax, x86::eax);
         break;
@@ -1767,11 +1809,11 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
                          : (op == OP_S8ADDL || op == OP_S8SUBL) ? 3     // Ra*8
                          : 0;
         if (ra == 31) a.xor_(x86::eax, x86::eax);
-        else          a.mov(x86::eax, reg32(ra));   // shadow-remapped (was a raw rbx read)
+        else          mov_from_reg32(x86::eax, ra);   // shadow-remapped (was a raw rbx read)
         if (sh) a.shl(x86::eax, imm(sh));            // scale in 32-bit: (Ra<<sh)[31:0] == ((RAV<<sh)+..)[31:0]
         if (islit)         a.mov(x86::ecx, imm(lit));
         else if (rb == 31) a.xor_(x86::ecx, x86::ecx);
-        else               a.mov(x86::ecx, reg32(rb));
+        else               mov_from_reg32(x86::ecx, rb);
         if (issub) a.sub(x86::eax, x86::ecx);
         else       a.add(x86::eax, x86::ecx);
         a.movsxd(x86::rax, x86::eax);
@@ -1780,7 +1822,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       default: break;
     }
 
-    if (rc != 31) a.mov(reg(rc), x86::rax);
+    if (rc != 31) mov_to_reg(rc, x86::rax);
   }
   // Epilogue. Count this block's instructions, then chain into the next block (staying
   // in native code) or return to the dispatcher.
@@ -1873,7 +1915,15 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   }
   a.mov(x86::eax, x86::r14d);   // total instructions completed across the chain
   a.bind(done);                 // bail jumps here with EAX already set
-  a.add(x86::rsp, imm(48));
+  // Sync the pins back to regs[] -- rbx still = regs (restored last), and every dispatcher exit
+  // (fall-through or mid-block bail) reaches here, so regs[] is live when we return.
+  a.mov(x86::qword_ptr(x86::rbx, 26 * 8), x86::r12);   // R26 (RA)
+  a.mov(x86::qword_ptr(x86::rbx, 16 * 8), x86::r13);   // R16 (a0)
+  a.mov(x86::qword_ptr(x86::rbx, 27 * 8), x86::r15);   // R27 (PV)
+  a.add(x86::rsp, imm(40));
+  a.pop(x86::r15);              // pins pop in reverse push order
+  a.pop(x86::r13);
+  a.pop(x86::r12);
   a.pop(x86::r14);
   a.pop(x86::rbp);
   a.pop(x86::rbx);
