@@ -1063,6 +1063,9 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       a.add(x86::eax, x86::r14d);                               // + earlier chained iterations
       a.jmp(done);
       a.bind(ok);
+      // HW_LDL SIGN-extends the longword to canonical form (QEMU gen_hw_ld uses MO_LESL; the EV68CB
+      // HRM is silent but the Alpha longword-canonical rule applies, same as LDL). NOTE: the interp's
+      // DO_HW_LDL zero-extends -- that is the bug, fixed in cpu_pal.h to match this.
       if (op == OP_HW_LDL) a.movsxd(x86::rax, x86::dword_ptr(x86::rsp, 32));
       else                 a.mov(x86::rax, x86::qword_ptr(x86::rsp, 32));   // HW_LDQ / VPTE: full quad
       mov_to_reg(ra, x86::rax);
