@@ -147,6 +147,7 @@ private:
   uint64_t m_pal_func[256];                     // cumulative: CALL_PAL function code that ended a block
   uint64_t m_mtpr_func[256];                    // cumulative: HW_MTPR (0x1d) IPR index that ended a block
   uint64_t m_hwld_func[16];                     // cumulative: HW_LD (0x1b) form (ins>>12 & 0xf) that ended a block
+  uint64_t m_misc_func[16];                     // cumulative: MISC (0x18) Ra==31 form (ins>>12 & 0xf: RPCC/RC/RS) that ended a block
   bool     m_first_breaker_logged;              // one-shot guard for the punch-list print
 #endif
 };

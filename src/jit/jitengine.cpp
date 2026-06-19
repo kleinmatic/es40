@@ -387,6 +387,7 @@ CJitEngine::CJitEngine(int cpu_id) : m_cpu_id(cpu_id), m_recorded(0), m_code_byt
   memset(m_pal_func, 0, sizeof(m_pal_func));
   memset(m_mtpr_func, 0, sizeof(m_mtpr_func));
   memset(m_hwld_func, 0, sizeof(m_hwld_func));
+  memset(m_misc_func, 0, sizeof(m_misc_func));
   m_first_breaker_logged = false;
 #endif
 #ifdef JIT_DISASM
@@ -568,6 +569,8 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
         m_mtpr_func[(words[plen] >> 8) & 0xFF]++;
       else if (bop == 0x1b)             // HW_LD: tally the form (phys/virt/lock/vpte/chk, ins[15:12])
         m_hwld_func[(words[plen] >> 12) & 0xF]++;
+      else if (bop == 0x18)             // MISC: tally the Ra==31 form (ins[15:12]: 0xc RPCC / 0xe RC / 0xf RS)
+        m_misc_func[(words[plen] >> 12) & 0xF]++;
       // Punch list: one-shot print of the first ACTIONABLE breaker -- skip the opcodes whose
       // compilable subset is already settled, so it points at the next NEW target rather than a
       // decided one: 0x00 CALL_PAL (terminator), 0x1b HW_LD / 0x1f HW_ST (physical done;
@@ -1974,6 +1977,11 @@ uint64_t CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr)
       lh[best] = 0;
     }
     printf("%s\n", buf);
+  }
+  if (m_term_op[0x18]) {   // MISC cut blocks -- which Ra==31 form dominates (RPCC degenerate-noop / RC,RS soft-intr-flag)
+    printf("[JIT][STATS][CPU%d]   MISC by form: RPCC=%llu RC=%llu RS=%llu\n", m_cpu_id,
+           (unsigned long long) m_misc_func[0xc], (unsigned long long) m_misc_func[0xe],
+           (unsigned long long) m_misc_func[0xf]);
   }
   m_stat_native = m_stat_interp = m_stat_hot = m_stat_miss = 0;   // reset the window
   return (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
