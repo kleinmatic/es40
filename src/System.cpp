@@ -735,7 +735,8 @@ int CSystem::SingleStep()
 u64 lastport;
 #endif //defined(DEBUG_PORTACCESS)
 
-#define CPU_LOCK_MATCH_MASK U64(0x00000807ffffff00)
+// EV6/EV68 Dcache blocks are 64 bytes; LDx_L/STx_C monitor that cache line.
+#define CPU_LOCK_MATCH_MASK U64(0x00000807ffffffc0)
 #define CPU_LOCK_IO_MASK    U64(0x0000080000000000)
 
 static inline bool cpu_lock_matches(u64 locked_address, u64 address)
@@ -744,31 +745,32 @@ static inline bool cpu_lock_matches(u64 locked_address, u64 address)
 }
 
 // --- Load-locked / store-conditional (HRM 4.2) -----------------------------
-// Value-compare model: each CPU records the address and value it observed at
-// LDx_L; the matching STx_C is an atomic compare-and-swap on that location
-// (dram_cas), so the "unchanged since LDx_L?" test and the store are one step.
-//
-// cpu_lock_flags is a shared bitmask (one bit per CPU), hence atomic RMW;
-// cpu_lock_address[]/cpu_lock_value[] are touched only by their owning CPU.
+// Keep the original CAS-backed model for same-address LL/SC sequences, because
+// it provides the emulator's MP atomicity. Some Alpha code stores conditionally
+// to a different quadword in the same locked cache line; those must not compare
+// against the value loaded from the LDx_L address.
 
 void CSystem::cpu_lock(int cpuid, u64 address, u64 value)
 {
 	state.cpu_lock_address[cpuid] = address;
-	cpu_lock_value[cpuid] = value;          // the exact value the matching LDx_L loaded
+	cpu_lock_value[cpuid] = value;
 	state.cpu_lock_flags |= (1 << cpuid);   // atomic fetch_or
 }
 
-bool CSystem::cpu_take_lock(int cpuid, u64 address, u64* expected)
+bool CSystem::cpu_take_lock(int cpuid, u64 address, u64* expected, bool* same_address)
 {
 	// I/O-space conditional stores have no cache line to watch; treat as held.
 	bool held = (address & CPU_LOCK_IO_MASK) ||
 	            ((state.cpu_lock_flags.load() & (1 << cpuid)) &&
 	             cpu_lock_matches(state.cpu_lock_address[cpuid], address));
 
-	// STx_C always consumes the lock, success or fail (HRM 4.2.4).
+	// STx_C always consumes this CPU's lock, success or fail.
 	state.cpu_lock_flags &= ~(1 << cpuid);  // atomic fetch_and
 	if (held)
+	{
 		*expected = cpu_lock_value[cpuid];
+		*same_address = (state.cpu_lock_address[cpuid] == address);
+	}
 	return held;
 }
 

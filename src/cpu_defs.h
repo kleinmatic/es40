@@ -254,10 +254,8 @@ static inline void dram_write(char* dram_ptr, u64 phys, int dsize, u64 data)
   }
 }
 
-/* Atomic compare-and-swap on a DRAM location, for Alpha STx_C (HRM 4.2):
- * succeeds iff memory still holds the value the matching LDx_L observed.
- * LL/SC operands are ISA-aligned, so the target is aligned. Returns true if
- * memory held `expected` (now swapped to `desired`). */
+/* Atomic compare-and-swap on a DRAM location for the emulator's MP LL/SC model.
+ * Used only when STx_C targets the same physical address as the matching LDx_L. */
 #if defined(_MSC_VER)
 #include <intrin.h>
 static inline bool dram_cas32(char* p, u32 expected, u32 desired)
@@ -741,15 +739,22 @@ inline u64 fsqrt64(u64 asig, s32 exp)
     u64 _stc_va = (va);                                     \
     u64 _stc_data = (src);                                  \
     u64 _stc_exp = 0;                                       \
+    bool _stc_same_address = false;                         \
     pbc = false;                                            \
     DATA_PHYS(_stc_va, ACCESS_WRITE, (size/8)-1);           \
-    /* STx_C: atomic compare-and-swap; succeeds iff still locked for this     \
-       address and memory is unchanged since the LDx_L. */                    \
-    if (cSystem->cpu_take_lock(state.iProcNum, phys_address, &_stc_exp) && !pbc) \
+    if (cSystem->cpu_take_lock(state.iProcNum, phys_address, &_stc_exp, &_stc_same_address) && !pbc) \
     {                                                       \
       LWR;                                                  \
       if (phys_address < dram_size)                         \
-        dest = dram_cas(dram_ptr, phys_address, _stc_exp, _stc_data, size) ? 1 : 0; \
+      {                                                     \
+        if (_stc_same_address)                              \
+          dest = dram_cas(dram_ptr, phys_address, _stc_exp, _stc_data, size) ? 1 : 0; \
+        else                                                \
+        {                                                   \
+          dram_write(dram_ptr, phys_address, size, _stc_data); \
+          dest = 1;                                         \
+        }                                                   \
+      }                                                     \
       else                                                  \
       {                                                     \
         cSystem->WriteMem(phys_address, size, _stc_data, this); \

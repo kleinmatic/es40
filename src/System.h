@@ -279,8 +279,8 @@ public:
   u64           get_c_dim(int ProcNum);
   void          set_c_dim(int ProcNum, u64 value);
 
-  void          cpu_lock(int cpuid, u64 address, u64 value);    // LDx_L: record locked addr + the value loaded (for STx_C compare)
-  bool          cpu_take_lock(int cpuid, u64 address, u64* expected); // STx_C: consume lock; true + *expected if still held & matching
+  void          cpu_lock(int cpuid, u64 address, u64 value);   // LDx_L: record locked range + loaded value
+  bool          cpu_take_lock(int cpuid, u64 address, u64* expected, bool* same_address);
   void          cpu_clear_lock(int cpuid);                     // exception/interrupt: drop the lock
   void          RequestSystemReset();
   bool          IsSystemResetRequested() const;
@@ -310,7 +310,7 @@ private:
   static std::vector<uint32_t> split_mb_into_dimms(uint32_t total_mb);
 
   int           iNumCPUs;
-  u64           cpu_lock_value[4]; // per-CPU LDx_L value, for STx_C compare-and-swap (transient; not in saved state)
+  u64           cpu_lock_value[4]; // per-CPU LDx_L value, for same-address STx_C compare-and-swap
 
   // Serializes drir RMW + delivery in interrupt() across device threads. On
   // CSystem (not in saved 'state'), so SaveState is unaffected.

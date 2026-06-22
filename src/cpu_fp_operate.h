@@ -208,12 +208,16 @@
 
 /* format conversions */
 #define DO_CVTQL  FPSTART;                                                                           \
-  state.f[FREG_3] = ((state.f[FREG_2] & 0xC0000000) << 32) | ((state.f[FREG_2] & 0x3FFFFFFF) << 29); \
-  if(FPR_GETSIGN(state.f[FREG_2]) ? (state.f[FREG_2] < U64(0xFFFFFFFF80000000)) :                    \
-       (state.f[FREG_2] > U64(0x000000007FFFFFFF)))                                                  \
   {                                                                                                  \
-    if(ins & I_FTRP_V)                                                                               \
-      vax_trap(TRAP_IOV, ins);                                                                       \
+    u64 cvtql_src = state.f[FREG_2];                                                                 \
+    state.f[FREG_3] = ((cvtql_src & 0xC0000000) << 32) | ((cvtql_src & 0x3FFFFFFF) << 29);            \
+    if(FPR_GETSIGN(cvtql_src) ? (cvtql_src < U64(0xFFFFFFFF80000000)) :                              \
+         (cvtql_src > U64(0x000000007FFFFFFF)))                                                      \
+    {                                                                                                \
+      write_fpcr_arch(state.fpcr | FPCR_IOV);                                                        \
+      if(ins & I_FTRP_V)                                                                             \
+        vax_trap(TRAP_IOV, ins);                                                                     \
+    }                                                                                                \
   }
 
 #define DO_CVTLQ  FPSTART;                                               \

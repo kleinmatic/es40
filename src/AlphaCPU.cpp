@@ -1303,9 +1303,14 @@ int CAlphaCPU::jit_fltl(CAlphaCPU* cpu, u32 ins)
 	case 0x02d: if (!(f[fa] & FPR_SIGN) || (f[fa] & ~FPR_SIGN) == 0) f[fc] = f[fb]; break;  // FCMOVGE
 	case 0x02e: if ((f[fa] & FPR_SIGN) || (f[fa] & ~FPR_SIGN) == 0) f[fc] = f[fb]; break;   // FCMOVLE
 	case 0x02f: if (!(f[fa] & FPR_SIGN) && (f[fa] & ~FPR_SIGN) != 0) f[fc] = f[fb]; break;  // FCMOVGT
-	case 0x030:                                                                  // CVTQL (no /V form)
-		f[fc] = ((f[fb] & U64(0xC0000000)) << 32) | ((f[fb] & U64(0x3FFFFFFF)) << 29);
+	case 0x030: {                                                                // CVTQL (no /V form)
+		u64 cvtql_src = f[fb];
+		f[fc] = ((cvtql_src & U64(0xC0000000)) << 32) | ((cvtql_src & U64(0x3FFFFFFF)) << 29);
+		if (FPR_GETSIGN(cvtql_src) ? (cvtql_src < U64(0xFFFFFFFF80000000)) :
+		    (cvtql_src > U64(0x000000007FFFFFFF)))
+			cpu->write_fpcr_arch(cpu->state.fpcr | FPCR_IOV);
 		break;
+	}
 	}
 	return 0;
 }
@@ -1398,8 +1403,7 @@ int CAlphaCPU::jit_read_locked(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 		*out = (size_bits == 32) ? sext_u64_32(raw) : raw;   // LDL_L sign-extends; LDQ_L is the full quad
 	}
 
-	// Establish the LL exclusive monitor (DO_LDx_L's READ_VIRT_LOCK_F makes the same cpu_lock call):
-	// per-CPU address/value + an atomic flag bit. The matching STx_C value-compares against it.
+	// Establish the LL exclusive monitor (DO_LDx_L's READ_VIRT_LOCK_F makes the same cpu_lock call).
 	cpu->cSystem->cpu_lock(cpu->state.iProcNum, phys, *out);
 	return 0;
 }
@@ -1552,8 +1556,9 @@ int CAlphaCPU::jit_write_phys(CAlphaCPU* cpu, u64 phys, int size_bits, u64 value
 	return 0;
 }
 
-// JIT store-conditional helper (static). STx_C: consume the LL exclusive monitor + (if still held)
-// the host CAS, returning 1 (success) / 0 (fail) for Ra. 
+// JIT store-conditional helper (static). Same-address STx_C uses the emulator's
+// CAS-backed MP model; different-address same-line STx_C stores without comparing
+// against the LDx_L datum.
 u64 CAlphaCPU::jit_stc(CAlphaCPU* cpu, u64 va, int size_bits, u64 value)
 {
 	if (cpu->m_jit_vreplay)
@@ -1598,13 +1603,17 @@ u64 CAlphaCPU::jit_stc(CAlphaCPU* cpu, u64 va, int size_bits, u64 value)
 		dpc.valid = true;
 	}
 
-	// The store-conditional (mirror WRITE_VIRT_COND): consume the monitor; if still held, CAS DRAM
-	// (or WriteMem for MMIO). cpu_take_lock always consumes the lock, success or fail.
 	u64 expected = 0;
-	if (!cpu->cSystem->cpu_take_lock(cpu->state.iProcNum, phys, &expected))
+	bool same_address = false;
+	if (!cpu->cSystem->cpu_take_lock(cpu->state.iProcNum, phys, &expected, &same_address))
 		return 0;                                            // lock lost -> SC fails
 	if (phys < cpu->dram_size)
-		return dram_cas(cpu->dram_ptr, phys, expected, value, size_bits) ? 1 : 0;
+	{
+		if (same_address)
+			return dram_cas(cpu->dram_ptr, phys, expected, value, size_bits) ? 1 : 0;
+		dram_write(cpu->dram_ptr, phys, size_bits, value);
+		return 1;
+	}
 	cpu->cSystem->WriteMem(phys, size_bits, value, cpu);     // MMIO conditional store
 	return 1;
 }
