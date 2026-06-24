@@ -2279,6 +2279,7 @@
     <ClInclude Include="..\DEC21143.h" />
     <ClInclude Include="..\DEC21143_mii.h" />
     <ClInclude Include="..\DEC21143_tulipreg.h" />
+    <ClInclude Include="..\diag_rpcc.h" />
     <ClInclude Include="..\Disk.h" />
     <ClInclude Include="..\DiskController.h" />
     <ClInclude Include="..\DiskDevice.h" />

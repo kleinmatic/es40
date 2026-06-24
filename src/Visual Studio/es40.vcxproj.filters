@@ -443,6 +443,9 @@
     <ClInclude Include="..\jit\jitengine.h">
       <Filter>Header Files\jit</Filter>
     </ClInclude>
+    <ClInclude Include="..\diag_rpcc.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\README.md">
