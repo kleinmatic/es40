@@ -38,10 +38,15 @@ jobs:
           - Release IDB - SSE2
           - Release NN - SSE2
           - Release NN NS - SSE2
+          # JIT (AsmJit) builds -- adds --enable-asmjit (x86-64 host)
+          - Release JIT
+          - Release JIT - SSE2
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Install build dependencies
         run: |
@@ -146,6 +151,11 @@ jobs:
           if [[ "$configuration" == *"- SSE2"* ]]; then
             echo "Configuring SSE2 (older-host compat) baseline for: $configuration"
             configure_args+=(--with-arch=sse2)
+          fi
+
+          if [[ "$configuration" == *"JIT"* ]]; then
+            echo "Configuring with AsmJit JIT for: $configuration"
+            configure_args+=(--enable-asmjit)
           fi
 
           if [[ "$is_no_network" -eq 1 ]]; then
@@ -637,10 +647,138 @@ jobs:
           path: ${{ runner.temp }}/macos-${{ matrix.configuration }}/
           if-no-files-found: error
 
+  macos-x86_64-jit-build:
+    # The JIT is x86-64 only (asmjit x64 backend; ASMJIT_NO_AARCH64), so it cannot build on the
+    # arm64 macos-latest image. Deliberately a separate Intel-only job -- the macos-build matrix
+    # above stays pure arm64 on macos-latest.
+    name: macOS x86-64 JIT build (Release JIT)
+    runs-on: macos-26-intel
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+
+          brew update
+          brew install \
+            autoconf \
+            autoconf-archive \
+            automake \
+            libtool \
+            pkg-config \
+            cmake \
+            ninja \
+            libpcap
+
+      - name: Build and install latest SDL3
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # Prefer release assets; gracefully handle API throttling/error payloads.
+          SDL_RELEASES_JSON="$(curl -fsSL -H 'User-Agent: github-actions' -H "Authorization: Bearer ${GH_TOKEN}" https://api.github.com/repos/libsdl-org/SDL/releases?per_page=10 || echo '[]')"
+          SDL3_URL="$(printf '%s' "$SDL_RELEASES_JSON" | python3 -c 'import sys,json,re; data=json.load(sys.stdin); data=[data] if isinstance(data,dict) else data; print(next((a.get("browser_download_url","") for rel in data for a in rel.get("assets",[]) if re.match(r"^SDL3-[0-9.]+\\.tar\\.gz$", a.get("name",""))), ""))')"
+
+          if [ -z "$SDL3_URL" ]; then
+            echo "Falling back to releases/latest redirect parsing for SDL3 tarball URL"
+            latest_loc="$(curl -fsSLI https://github.com/libsdl-org/SDL/releases/latest | tr -d '\r' | awk -F': ' 'tolower($1)=="location"{print $2}' | tail -n1)"
+            latest_tag="${latest_loc##*/}"
+            latest_ver="${latest_tag#release-}"
+            SDL3_URL="https://github.com/libsdl-org/SDL/releases/download/${latest_tag}/SDL3-${latest_ver}.tar.gz"
+          fi
+
+          SDL3_TARBALL="${SDL3_URL##*/}"
+          SDL3_SRC_DIR="${SDL3_TARBALL%.tar.gz}"
+
+          curl -fsSL "$SDL3_URL" -o "$SDL3_TARBALL"
+          tar -xzf "$SDL3_TARBALL"
+
+          cmake -S "$SDL3_SRC_DIR" -B sdl3-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DSDL_X11=OFF
+          cmake --build sdl3-build
+          sudo cmake --install sdl3-build
+
+      - name: Provide SDL pkg-config compatibility alias for configure.ac
+        run: |
+          set -euo pipefail
+
+          mkdir -p .github/pkgconfig
+          cat > .github/pkgconfig/sdl.pc <<'EOF'
+          prefix=/usr/local
+          exec_prefix=${prefix}
+          libdir=${exec_prefix}/lib
+          includedir=${prefix}/include
+
+          Name: sdl
+          Description: SDL compatibility alias to SDL3
+          Version: 3.0.0
+          Requires: sdl3
+          EOF
+
+      - name: Generate autotools files
+        run: sh autogen.sh
+
+      - name: Configure with AsmJit JIT
+        run: |
+          set -euo pipefail
+
+          env \
+            CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-fpermissive -std=c++17" \
+            CPPFLAGS="-I$PWD/src/emu" \
+            PKG_CONFIG_PATH="$PWD/.github/pkgconfig:/usr/local/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
+            ./configure --enable-asmjit
+
+      - name: Build macOS x86-64 JIT validation target
+        run: |
+          set -euo pipefail
+
+          make clean
+
+          make -C src es40 es40_cfg -j"$(sysctl -n hw.ncpu)"
+
+      - name: Collect macOS x86-64 JIT artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          artifact_dir="$RUNNER_TEMP/macos-x86_64-Release JIT"
+          rm -rf "$artifact_dir"
+          mkdir -p "$artifact_dir"
+
+          for binary in es40 es40_cfg; do
+            if [[ -f "src/$binary" ]]; then
+              cp "src/$binary" "$artifact_dir/"
+            fi
+          done
+
+          sdl_lib="$(find /usr/local/lib /opt/homebrew/lib -maxdepth 1 -type f \( -name 'libSDL3*.dylib' -o -name 'SDL3*.dylib' \) 2>/dev/null | head -n1 || true)"
+          if [[ -n "$sdl_lib" ]]; then
+            cp "$sdl_lib" "$artifact_dir/"
+          fi
+
+          if [[ -z "$(find "$artifact_dir" -maxdepth 1 -type f -print -quit)" ]]; then
+            echo "No macOS x86-64 JIT artifacts were produced in src/."
+            exit 1
+          fi
+
+      - name: Upload macOS x86-64 JIT artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-x86_64-Release JIT
+          path: ${{ runner.temp }}/macos-x86_64-Release JIT/
+          if-no-files-found: error
+
   cleanup-runs:
     name: Delete runs older than the previous 4
     runs-on: ubuntu-latest
-    needs: [linux-build, windows-build, macos-build]
+    needs: [linux-build, windows-build, macos-build, macos-x86_64-jit-build]
     # Run even when builds fail, but only once per push (skip pull_request duplicates).
     if: ${{ always() && github.event_name == 'push' }}
     # Housekeeping only: a pruning hiccup must not mark the build run as failed.
