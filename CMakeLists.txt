@@ -8,7 +8,26 @@ option(ES40_DISABLE_LSS_LSM "Disable LSS/LSM (lockstep) builds." OFF)
 option(ES40_DISABLE_IDB "Disable IDB (built-in debugger) builds." OFF)
 option(ES40_DISABLE_ASMJIT "Disable ASMJIT" ON)
 
-# Only used for PCap/NPCap at the moment. 
+# CPU baseline: AVX2 (default, Haswell+) for performance, or SSE2 for older-host compatibility.
+# Applied on x86 only (no-op on ARM / Apple Silicon). The JIT emits its own x86 and is unaffected;
+# this governs the host C++ (interpreter, devices, GUI). Mirrors the VS "- SSE2" configs.
+set(ES40_ARCH "AVX2" CACHE STRING "x86 CPU baseline: AVX2 (default) or SSE2 (older-host compat)")
+set_property(CACHE ES40_ARCH PROPERTY STRINGS AVX2 SSE2)
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64|i[3-6]86|x86")
+    if (MSVC)
+        if (ES40_ARCH STREQUAL "AVX2")
+            add_compile_options(/arch:AVX2)
+        endif()   # SSE2 is the MSVC x64 default
+    else()
+        if (ES40_ARCH STREQUAL "AVX2")
+            add_compile_options(-mavx2 -mfma)
+        else()
+            add_compile_options(-msse2)
+        endif()
+    endif()
+endif()
+
+# Only used for PCap/NPCap at the moment.
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/extras/cmake")
 
 if (NOT ES40_DISABLE_SDL)

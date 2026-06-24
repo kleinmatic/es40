@@ -43,7 +43,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.71])
-AC_INIT([es40],[0.71],[https://github.com/ES40-Emu/es40/issues/new],[],[https://github.com/ES40-Emu/es40/issues])
+AC_INIT([es40],[0.72],[https://github.com/ES40-Emu/es40/issues/new],[],[https://github.com/ES40-Emu/es40/issues])
 AC_CONFIG_SRCDIR([src/Flash.cpp])
 AC_CONFIG_MACRO_DIRS([m4])
 AM_CONFIG_HEADER([src/config.h])
@@ -74,6 +74,24 @@ case "$host_os" in
     # Keep CI output focused on actionable issues on macOS where clang can
     # emit noisy override-style warnings for legacy code.
     CXXFLAGS="$CXXFLAGS -Wno-inconsistent-missing-override"
+    ;;
+esac
+
+# CPU baseline (x86 only): AVX2 (default, Haswell+) for performance, or SSE2 for older-host
+# compatibility. Mirrors the Visual Studio "- SSE2" configs and the CMake ES40_ARCH option.
+# The JIT emits its own x86 and is unaffected; this governs the host C++.
+AC_ARG_WITH([arch],
+  [AS_HELP_STRING([--with-arch=avx2|sse2],[x86 CPU baseline: avx2 (default, Haswell+) or sse2 (older-host compat)])],
+  [],
+  [with_arch=avx2])
+
+case "$host_cpu" in
+  x86_64|amd64|i?86)
+    case "$with_arch" in
+      avx2) CXXFLAGS="$CXXFLAGS -mavx2 -mfma"; CFLAGS="$CFLAGS -mavx2 -mfma" ;;
+      sse2) CXXFLAGS="$CXXFLAGS -msse2"; CFLAGS="$CFLAGS -msse2" ;;
+      *)    AC_MSG_ERROR([--with-arch must be avx2 or sse2]) ;;
+    esac
     ;;
 esac
 

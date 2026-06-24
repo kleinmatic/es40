@@ -32,6 +32,12 @@ jobs:
           - Release NN NS IDB
           - Release NN NS LSM
           - Release NN NS LSS
+          # SSE2 older-host compatibility builds (default is AVX2; see configure.ac --with-arch)
+          - Release - SSE2
+          - Release NS - SSE2
+          - Release IDB - SSE2
+          - Release NN - SSE2
+          - Release NN NS - SSE2
 
     steps:
       - name: Checkout
@@ -137,6 +143,11 @@ jobs:
           )
           configure_args=()
 
+          if [[ "$configuration" == *"- SSE2"* ]]; then
+            echo "Configuring SSE2 (older-host compat) baseline for: $configuration"
+            configure_args+=(--with-arch=sse2)
+          fi
+
           if [[ "$is_no_network" -eq 1 ]]; then
             echo "Configuring without pcap for NN configuration: $configuration"
             configure_args+=(--disable-pcap)
@@ -233,6 +244,13 @@ jobs:
           - Release NN NS IDB
           - Release NN NS LSM
           - Release NN NS LSS
+          # SSE2 older-host compatibility builds (default configs are AVX2)
+          - Release - SSE2
+          - Release JIT - SSE2
+          - Release NS - SSE2
+          - Release IDB - SSE2
+          - Release NN - SSE2
+          - Release NN NS - SSE2
 
     steps:
       - name: Checkout
