@@ -1,4 +1,4 @@
-/* ES40 emulator.
+﻿/* ES40 emulator.
  * Copyright (C) 2007-2008 by the ES40 Emulator Project
  *
  * WWW    : http://www.es40.org
@@ -3376,6 +3376,8 @@ int CAlphaCPU::virt2phys(u64 virt, u64* phys, int flags, bool* asm_bit, u32 ins)
 #endif
 					printf("acv\n");
 #endif
+			if (!forreal) // FAKE probe: report failure, don't vector the fault — caller re-runs it under the interpreter
+				return -1;
 			if (flags & ACCESS_EXEC)
 			{
 
@@ -3441,6 +3443,8 @@ int CAlphaCPU::virt2phys(u64 virt, u64* phys, int flags, bool* asm_bit, u32 ins)
 #endif
 					printf("fault\n");
 #endif
+			if (!forreal) // FAKE probe: report failure, don't vector the fault — caller re-runs it under the interpreter
+				return -1;
 			if (flags & ACCESS_EXEC)
 			{
 
