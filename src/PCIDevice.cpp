@@ -85,6 +85,23 @@
 #include "StdAfx.h"
 #include "PCIDevice.h"
 #include "System.h"
+#include "diag_rpcc.h"
+
+#include <chrono>
+#include <cstdarg>
+
+// Definition of the per-thread diagnostic-stall accumulator declared in diag_rpcc.h.
+thread_local int64_t g_diag_excluded_ns = 0;
+
+// printf() that times its console-I/O stall into g_diag_excluded_ns so jit_run keeps it out of the
+// guest RPCC -- the PCI decode-off diagnostics below can spam during VGA init and jump the counter.
+static void diag_printf(const char* fmt, ...)
+{
+	const auto t0 = std::chrono::steady_clock::now();
+	va_list ap; va_start(ap, fmt); vprintf(fmt, ap); va_end(ap);
+	g_diag_excluded_ns += (int64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
+		std::chrono::steady_clock::now() - t0).count();
+}
 
 #define DEBUG_PCI 0
 
@@ -352,14 +369,14 @@ u64 CPCIDevice::ReadMem(int index, u64 address, int dsize)
 	{
 		if (dev_range_is_io[index] && !(pci_state.config_data[0][1] & endian_32(1)))
 		{
-			printf("%s(%s) Legacy IO access with IO disabled from PCI config.\n",
+			diag_printf("%s(%s) Legacy IO access with IO disabled from PCI config.\n",
 				myCfg->get_myName(), myCfg->get_myValue());
 			return 0;
 		}
 
 		if (!dev_range_is_io[index] && !(pci_state.config_data[0][1] & endian_32(2)))
 		{
-			printf("%s(%s) Legacy memory access with memory disabled from PCI config.\n",
+			diag_printf("%s(%s) Legacy memory access with memory disabled from PCI config.\n",
 				myCfg->get_myName(), myCfg->get_myValue());
 			return 0;
 		}
@@ -378,7 +395,7 @@ u64 CPCIDevice::ReadMem(int index, u64 address, int dsize)
 
 	if (pci_range_is_io[func][bar] && !(pci_state.config_data[func][1] & endian_32(1)))
 	{
-		printf("%s(%s).%d PCI IO access with IO disabled from PCI config.\n",
+		diag_printf("%s(%s).%d PCI IO access with IO disabled from PCI config.\n",
 			myCfg->get_myName(), myCfg->get_myValue(), func);
 		return 0;
 	}
@@ -386,7 +403,7 @@ u64 CPCIDevice::ReadMem(int index, u64 address, int dsize)
 	if (!pci_range_is_io[func][bar]
 		&& !(pci_state.config_data[func][1] & endian_32(2)))
 	{
-		printf("%s(%s).%d PCI memory access with memory disabled from PCI config.\n",
+		diag_printf("%s(%s).%d PCI memory access with memory disabled from PCI config.\n",
 			myCfg->get_myName(), myCfg->get_myValue(), func);
 		return 0;
 	}
@@ -419,14 +436,14 @@ void CPCIDevice::WriteMem(int index, u64 address, int dsize, u64 data)
 	{
 		if (dev_range_is_io[index] && !(pci_state.config_data[0][1] & endian_32(1)))
 		{
-			printf("%s(%s) Legacy IO access with IO disabled from PCI config.\n",
+			diag_printf("%s(%s) Legacy IO access with IO disabled from PCI config.\n",
 				myCfg->get_myName(), myCfg->get_myValue());
 			return;
 		}
 
 		if (!dev_range_is_io[index] && !(pci_state.config_data[0][1] & endian_32(2)))
 		{
-			printf("%s(%s) Legacy memory access with memory disabled from PCI config.\n",
+			diag_printf("%s(%s) Legacy memory access with memory disabled from PCI config.\n",
 				myCfg->get_myName(), myCfg->get_myValue());
 			return;
 		}
@@ -448,7 +465,7 @@ void CPCIDevice::WriteMem(int index, u64 address, int dsize, u64 data)
 
 	if (pci_range_is_io[func][bar] && !(pci_state.config_data[func][1] & endian_32(1)))
 	{
-		printf("%s(%s).%d PCI IO access with IO disabled from PCI config.\n",
+		diag_printf("%s(%s).%d PCI IO access with IO disabled from PCI config.\n",
 			myCfg->get_myName(), myCfg->get_myValue(), func);
 		return;
 	}
@@ -456,7 +473,7 @@ void CPCIDevice::WriteMem(int index, u64 address, int dsize, u64 data)
 	if (!pci_range_is_io[func][bar]
 		&& !(pci_state.config_data[func][1] & endian_32(2)))
 	{
-		printf("%s(%s).%d PCI memory access with memory disabled from PCI config.\n",
+		diag_printf("%s(%s).%d PCI memory access with memory disabled from PCI config.\n",
 			myCfg->get_myName(), myCfg->get_myValue(), func);
 		return;
 	}

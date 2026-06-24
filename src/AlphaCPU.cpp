@@ -352,6 +352,7 @@
 #include "cpu_mvi.h"
 #include "cpu_pal.h"
 #include "cpu_debug.h"
+#include "diag_rpcc.h"
 #if defined(_M_X64) || defined(__x86_64__)
 #include <xmmintrin.h>   // _mm_setcsr: pin host MXCSR for the JIT SSE FP path
 #endif
@@ -755,6 +756,9 @@ void CAlphaCPU::jit_run(int budget)
 {
 	if (m_jit) m_jit->reclaim_if_pending();   // deferred code reclaim, here at a safe point (no compiled frame live)
 	const auto now = std::chrono::steady_clock::now();
+	cc_last_sync += std::chrono::nanoseconds(g_diag_excluded_ns);   // keep device-diagnostic print stalls out of the RPCC (diag_rpcc.h)
+	g_diag_excluded_ns = 0;
+	if (cc_last_sync > now) cc_last_sync = now;   // a stall can't exceed the batch's real elapsed; never bill negative
 	const auto cc_delta = now - cc_last_sync;
 	cc_last_sync = now;
 	// Wall-clock RPCC: advance the cycle counter by real elapsed time * cpu_hz (when enabled) so
