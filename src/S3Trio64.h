@@ -329,6 +329,9 @@ private:
 
   // screen refresh stuff
   std::chrono::steady_clock::time_point m_last_refresh_time;
+  // Dirty-gate state: skip the per-refresh rasterize + GPU upload when nothing visible changed.
+  uint64_t m_last_cursor_sig = 0;     // HW-cursor (mode/pos/data-addr) folded in -- not tracked by vga_mem_updated
+  int      m_frames_since_render = 0;  // forced-refresh counter so cursor/text blink still animate when static
 
   // accel I/O (S3 Trio uses 0x42E8/0x4AE8)
   void          AccelIOWrite(u32 port, u8 data);

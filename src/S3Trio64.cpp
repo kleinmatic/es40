@@ -4552,6 +4552,25 @@ void CS3Trio64::update(void)
 		return;
 	}
 
+	// Dirty-gate: re-rasterize + re-upload only when something visible changed. vga_mem_updated covers
+	// VRAM + CRTC text-cursor + palette + mode writes; the S3 hardware cursor (mode/pos/data-addr) is not
+	// flagged, so fold it into a signature. Force a refresh every few frames so the cursor / blinking text
+	// still animate on an otherwise static screen; tick_frame() keeps the blink counter advancing on the
+	// skip path so blink timing stays correct.
+	const int kBlinkRefreshFrames = 8;   // >= 2x the ~1.9 Hz VGA blink toggle at a 60 Hz refresh
+	const uint64_t cursor_sig = ((uint64_t) s3.cursor_mode << 56)
+	                          | ((uint64_t) s3.cursor_start_addr << 24)
+	                          | ((uint64_t) (s3.cursor_x & 0x7FF) << 12)
+	                          | (uint64_t) (s3.cursor_y & 0x7FF);
+	if (!state.vga_mem_updated && cursor_sig == m_last_cursor_sig
+	    && ++m_frames_since_render < kBlinkRefreshFrames)
+	{
+		screen().tick_frame();   // keep cursor/text-blink timing alive while skipping the render
+		return;
+	}
+	m_frames_since_render = 0;
+	m_last_cursor_sig = cursor_sig;
+
 	vga.crtc.start_addr = vga.crtc.start_addr_latch; // FIXME: Figure out proper handling, but makes BSD happy again....
 	vga.attribute.pel_shift = vga.attribute.pel_shift_latch;
 
