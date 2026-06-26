@@ -14,6 +14,14 @@
 
 #include <cstdint>
 #include "../config_debug.h"   // JIT_VERIFY
+#ifdef JIT_STATS
+#if defined(_MSC_VER)
+#include <intrin.h>        // __rdtsc -- host TSC for the JIT_STATS wall-time split
+#else
+#include <x86intrin.h>
+#endif
+static inline uint64_t jit_rdtsc() { return __rdtsc(); }
+#endif
 #if defined(JIT_REGPROF) && !defined(JIT_STATS)
 #error "JIT_REGPROF needs JIT_STATS (its report rides note_exec's 100M-instruction window)"
 #endif
@@ -128,7 +136,7 @@ public:
   // Accumulate native vs interpreted instruction counts; prints coverage periodically.
   // Returns the wall-clock ns spent in this call's stats-print I/O (0 when it doesn't report),
   // so the dispatcher can exclude that stall from the wall-clock-pinned RPCC.
-  uint64_t note_exec(uint32_t native_instr, uint32_t interp_instr);
+  uint64_t note_exec(uint32_t native_instr, uint32_t interp_instr, uint64_t comp_tsc = 0, uint64_t interp_tsc = 0);
 #endif
 
 #ifdef JIT_REGPROF
@@ -160,6 +168,8 @@ private:
   uint64_t m_stat_compiled, m_stat_plen_sum;    // cumulative: compiled blocks, sum of their lengths
   uint64_t m_stat_code_bytes;                   // cumulative: emitted x86 bytes (code expansion = /plen_sum)
   uint64_t m_stat_wall_last_ns;                 // steady_clock ns at the last window report (throughput delta)
+  uint64_t m_tsc_compiled, m_tsc_interp;        // windowed: host TSC cycles in b->code() vs interp fallback
+  uint64_t m_tsc_window_start;                  // host TSC at window start (the time-split denominator)
   uint64_t m_term_op[64];                       // cumulative: opcode that ended a block's compiled prefix
   uint64_t m_pal_func[256];                     // cumulative: CALL_PAL function code that ended a block
   uint64_t m_mtpr_func[256];                    // cumulative: HW_MTPR (0x1d) IPR index that ended a block

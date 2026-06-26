@@ -854,12 +854,15 @@ void CAlphaCPU::jit_run(int budget)
 			memcpy(snap, state.r, sizeof(snap));
 			u64 f_pre[64];  // FP file before the interp pass -- restored before the compiled pass below
 			memcpy(f_pre, state.f, sizeof(f_pre));   // so the compiled FP ops read the same f[] the interp did
-				// I_CTL is read-modify-written within one compiled prefix (HW_MFPR I_CTL ... HW_MTPR I_CTL,
-				// a terminator): the interp pass writes it before the compiled pass reads it. Snapshot its
+				// I_CTL/CM/SIRR + PCTX fields (HW_MFPR 0x40-7f reads astrr/aster/fpen/ppcen) are read-modify-written; a HW_MFPR reads, a later HW_MTPR writes,
+				// so the interp pass writes before the compiled pass's HW_MFPR reads. Snapshot the read-back
 				// fields here and restore them before b->code() below -- like snap/f_pre do for GPRs/FP.
 				const bool ictl_sde_pre = state.sde, ictl_hwe_pre = state.hwe;
 				const int  ictl_spe_pre = state.i_ctl_spe, ictl_vam_pre = state.i_ctl_va_mode;
 				const u64  ictl_vptb_pre = state.i_ctl_vptb, ictl_other_pre = state.i_ctl_other;
+				const int  cm_pre = state.cm, sir_pre = state.sir;   // CM/SIRR read-back (HW_MFPR CM/SIRR)
+				const int  aster_pre = state.aster, astrr_pre = state.astrr;   // AST/FPEN/PPCEN read-back via the
+				const int  fpen_pre = state.fpen, ppcen_pre = state.ppcen;     // PCTX group (HW_MFPR 0x40-7f)
 			const u32* vw = (const u32*) ((const u8*) dram_ptr + b->phys);
 			u32 vn = 0;   // loads recorded for replay
 			u32 sn = 0;   // stores recorded for the compiled-pass compare
@@ -998,6 +1001,9 @@ void CAlphaCPU::jit_run(int budget)
 					d[15] = (u64) state.sde; d[16] = (u64) state.hwe;            // I_CTL (compiled as terminator)
 					d[17] = (u64) (u32) state.i_ctl_spe; d[18] = (u64) (u32) state.i_ctl_va_mode;
 					d[19] = state.i_ctl_vptb; d[20] = state.i_ctl_other;
+					d[21] = (u64) (u32) state.cm;    d[22] = (u64) (u32) state.sir;     // CM, SIRR
+					d[23] = (u64) (u32) state.aster; d[24] = (u64) (u32) state.astrr;   // 0x40-group ASTER/ASTRR
+					d[25] = (u64) (u32) state.fpen;  d[26] = (u64) (u32) state.ppcen;   // 0x40-group FPEN/PPCEN
 				};
 				auto put_iprs = [&](const u64* s) {
 					state.last_tb_virt = s[0]; last_dtb_virt[0] = s[1]; last_dtb_virt[1] = s[2];
@@ -1009,8 +1015,11 @@ void CAlphaCPU::jit_run(int budget)
 					state.sde = (bool) s[15]; state.hwe = (bool) s[16];
 					state.i_ctl_spe = (int) s[17]; state.i_ctl_va_mode = (int) s[18];
 					state.i_ctl_vptb = s[19]; state.i_ctl_other = s[20];
+					state.cm = (int) s[21]; state.sir = (int) s[22];
+					state.aster = (int) s[23]; state.astrr = (int) s[24];
+					state.fpen = (int) s[25]; state.ppcen = (int) s[26];
 				};
-				u64 ipr_interp[21];
+				u64 ipr_interp[27];
 				cap_iprs(ipr_interp);
 				// FP file: compiled ITOFx writes state.f live (like the IPR writes); snapshot the
 				// interp pass's result, compare after the compiled pass, then restore.
@@ -1022,6 +1031,9 @@ void CAlphaCPU::jit_run(int budget)
 					state.sde = ictl_sde_pre; state.hwe = ictl_hwe_pre;   // restore I_CTL too: a compiled HW_MFPR must read the pre-interp value
 					state.i_ctl_spe = ictl_spe_pre; state.i_ctl_va_mode = ictl_vam_pre;
 					state.i_ctl_vptb = ictl_vptb_pre; state.i_ctl_other = ictl_other_pre;
+					state.cm = cm_pre; state.sir = sir_pre;                      // ...and CM/SIRR
+					state.aster = aster_pre; state.astrr = astrr_pre;            // ...and the PCTX read-backs (a
+					state.fpen = fpen_pre; state.ppcen = ppcen_pre;              // HW_MFPR PCTX reads these live)
 				const u64 interp_pc = state.pc;   // interpreter is authoritative for the PC
 				m_jit_vreplay = true;
 				m_jit_vlog_i = 0;
@@ -1049,9 +1061,9 @@ void CAlphaCPU::jit_run(int budget)
 						       (unsigned long long) state.r[2], (unsigned long long) jr[2],
 						       (unsigned long long) snap[5]);
 					}
-					u64 ipr_jit[21];
+					u64 ipr_jit[27];
 					cap_iprs(ipr_jit);   // compiled pass wrote IPRs into live state; check vs interp
-					for (int ii = 0; ii < 21; ii++) if (ipr_jit[ii] != ipr_interp[ii])
+					for (int ii = 0; ii < 27; ii++) if (ipr_jit[ii] != ipr_interp[ii])
 						printf("[JIT][VERIFY] IPR MISMATCH at %016llx slot %d: interp=%016llx jit=%016llx\n",
 						       (unsigned long long) start_virt, ii,
 						       (unsigned long long) ipr_interp[ii], (unsigned long long) ipr_jit[ii]);
@@ -1073,7 +1085,13 @@ void CAlphaCPU::jit_run(int budget)
 			// jumps straight in instead of returning
 			if (m_link_from) { ((CJitEngine::JitBlock*) m_link_from)->link = b; m_link_from = nullptr; }
 			m_jit_budget = budget;   // ceiling for compiled chains (epilogue stops at it)
+#ifdef JIT_STATS
+			const uint64_t _comp_t0 = jit_rdtsc();
+#endif
 			const u32 done = b->code(this, &state.r[0]);
+#ifdef JIT_STATS
+			const uint64_t _comp_tsc = jit_rdtsc() - _comp_t0;   // host cycles in this compiled chain
+#endif
 			state.r[31] = 0;
 			break_seq_icache();   // compiled block wrote pc natively (no set_pc); drop the stale cursor
 			// state.pc is written by the compiled block itself (next PC, or the bail PC).
@@ -1085,7 +1103,7 @@ void CAlphaCPU::jit_run(int budget)
 			cc_large += (u64) done * cc_per_instruction;
 			budget -= done;
 #ifdef JIT_STATS
-			cc_last_sync += std::chrono::nanoseconds(m_jit->note_exec(done, 0));   // don't bill the stats-print stall to the wall-clock RPCC
+			cc_last_sync += std::chrono::nanoseconds(m_jit->note_exec(done, 0, _comp_tsc, 0));   // don't bill the stats-print stall to the wall-clock RPCC
 #endif
 			if (done > 0) continue;   // progress made; done==0 (faulting first insn) falls through
 #endif
@@ -1097,6 +1115,9 @@ void CAlphaCPU::jit_run(int budget)
 		m_link_from = nullptr;
 		u32 n = 0;
 		u64 expected = start_virt;
+#ifdef JIT_STATS
+			const uint64_t _interp_t0 = jit_rdtsc();
+#endif
 		while (budget > 0)
 		{
 			execute();
@@ -1107,7 +1128,7 @@ void CAlphaCPU::jit_run(int budget)
 				break;
 		}
 #ifdef JIT_STATS
-		cc_last_sync += std::chrono::nanoseconds(m_jit->note_exec(0, n));   // don't bill the stats-print stall to the wall-clock RPCC
+		cc_last_sync += std::chrono::nanoseconds(m_jit->note_exec(0, n, 0, jit_rdtsc() - _interp_t0));   // don't bill the stats-print stall to the wall-clock RPCC
 #endif
 		// Record only translatable block starts (a translation miss left have_phys false).
 		if (have_phys && state.pc != expected)
@@ -1703,10 +1724,21 @@ u64 CAlphaCPU::jit_hw_mfpr(CAlphaCPU* cpu, u32 ins, u64 cur)
 
 /* HW_MTPR (PALmode): the IPR write selected by `function` (value = Rb). Mirrors DO_HW_MTPR
  * (cpu_pal.h) verbatim. Pure stores are verify-compared via the IPR snapshot; the TB fills
- * forward to add_tb_i/_d (idempotent, so the verify double-run is safe); IER's check_int=true
- * kick can only force an interrupt poll, never suppress one. */
+ * forward to add_tb_i/_d (idempotent, so the verify double-run is safe); the check_int=true kick
+ * (IER/CM/SIRR/AST) can only force an interrupt poll, never suppress one. The 0x40-7f ASN write
+ * (bit 0) is excluded -- classify() never compiles it (it flushes the dpc + bumps the asn epoch). */
 void CAlphaCPU::jit_hw_mtpr(CAlphaCPU* cpu, u32 function, u64 value)
 {
+	// 0x40-0x7f bitmask group: ASTER/ASTRR/PPCEN/FPEN field stores (+check_int for the AST bits). The
+	// ASN write (bit 0, dpc flush + asn-epoch bump) is never compiled -- classify() routes it to OP_NONE.
+	if ((function & 0xc0) == 0x40)
+	{
+		if (function & 2)  { cpu->state.aster = (int) (value >> 5) & 0xf; cpu->state.check_int = true; }
+		if (function & 4)  { cpu->state.astrr = (int) (value >> 9) & 0xf; cpu->state.check_int = true; }
+		if (function & 8)    cpu->state.ppcen = (int) (value >> 1) & 1;
+		if (function & 16)   cpu->state.fpen  = (int) (value >> 2) & 1;
+		return;
+	}
 	switch (function)
 	{
 	case 0x00: cpu->state.last_tb_virt = value; break;                          // ITB_TAG
@@ -1715,6 +1747,14 @@ void CAlphaCPU::jit_hw_mtpr(CAlphaCPU* cpu, u32 function, u64 value)
 	case 0x03: cpu->tbia(ACCESS_EXEC); break;                                   // ITB_IA (invalidate all ITB)
 	case 0x04: cpu->tbis(value, ACCESS_EXEC); break;                            // ITB_IS (single ITB invalidate)
 	case 0x13: cpu->flush_icache(); break;                                      // IC_FLUSH (lazy flush + deferred reclaim)
+	case 0x09:                                                                   // CM (current mode)
+		cpu->state.cm = (int) (value >> 3) & 3;
+		cpu->state.check_int = true;
+		break;
+	case 0x0b:                                                                   // IER_CM: write CM, then fall into IER
+		cpu->state.cm = (int) (value >> 3) & 3;
+		cpu->state.check_int = true;
+		[[fallthrough]];
 	case 0x0a:                                                                   // IER
 		cpu->state.asten = (int) (value >> 13) & 1;
 		cpu->state.sien  = (int) (value >> 13) & 0xfffe;
@@ -1723,6 +1763,10 @@ void CAlphaCPU::jit_hw_mtpr(CAlphaCPU* cpu, u32 function, u64 value)
 		cpu->state.slen  = (int) (value >> 32) & 1;
 		cpu->state.eien  = (int) (value >> 33) & 0x3f;
 		cpu->state.check_int = true;                       // newly enabled pending ints must be polled
+		break;
+	case 0x0c:                                                                   // SIRR (software interrupt request)
+		cpu->state.sir = (int) (value >> 13) & 0xfffe;
+		cpu->state.check_int = true;
 		break;
 	case 0x11:                                                                   // I_CTL (terminator; mirrors DO_HW_MTPR)
 		cpu->state.i_ctl_other   = (value & U64(0x00000000006e2f67)) | U64(0x0000000000100000);  // bit 20 hardwired-on (EV6/EV68)

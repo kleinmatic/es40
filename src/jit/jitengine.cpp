@@ -295,16 +295,22 @@ SafeOp classify(uint32_t ins, bool pal_block)
     case 0x1d: {                // HW_MTPR (PALmode): compile the pure-store IPRs, the TB fills
       // (idempotent add_tb_i/_d), IER (field stores + check_int kick), the ITB invalidates (idempotent
       // tbia/tbiap/tbis -> note_itb_invalidate), IC_FLUSH (lazy flush; reclaim deferred off the
-      // compiled frame), and I_CTL (terminator: writes SDE/SPE/VA mode, so re-dispatch past it). DTB
-      // invalidates (dpc coherence), CM, SIRR/HW_INT_CLR, PAL_BASE, the 0x40-7f group stay interpreted.
+      // compiled frame), I_CTL (terminator: writes SDE/SPE/VA mode), CM/SIRR (mode + soft-int fields,
+      // check_int kick), and the 0x40-7f AST/FPEN/PPCEN stores. DTB invalidates (dpc coherence), ASN
+      // writes, HW_INT_CLR, PAL_BASE, VA_CTL (translation/flush) stay interpreted.
       if (!pal_block) return OP_NONE;
-      switch ((ins >> 8) & 0xff) {
+      const uint32_t mfn = (ins >> 8) & 0xff;
+      // 0x40-0x7f bitmask group: bit 0 writes ASN (dpc flush + asn-epoch bump) -> must terminate; the
+      // rest (ASTER/ASTRR/PPCEN/FPEN) are pure field stores (+check_int), safe to compile.
+      if ((mfn & 0xc0) == 0x40) return (mfn & 1) ? OP_NONE : OP_HW_MTPR;
+      switch (mfn) {
         case 0x00: case 0x14: case 0x20: case 0x26:   // ITB_TAG, PCTR_CTL, DTB_TAG0, DTB_ALTMODE
         case 0x29: case 0xa0: case 0xc0:              // DC_CTL, DTB_TAG1, CC
         case 0x01: case 0x21: case 0xa1:              // ITB_PTE, DTB_PTE0, DTB_PTE1 (TB fills)
         case 0x02: case 0x03: case 0x04:              // ITB_IAP, ITB_IA, ITB_IS (idempotent ITB invalidates)
         case 0x13:                                    // IC_FLUSH (lazy gen-bump flush; reclaim deferred off-frame)
         case 0x0a:                                    // IER (interrupt enables + check_int kick)
+        case 0x09: case 0x0b: case 0x0c:              // CM, IER_CM, SIRR (mode/soft-int fields + check_int)
           return OP_HW_MTPR;
         case 0x11:                                    // I_CTL: changes SDE (shadow remap)/SPE/VA mode -> terminate
           return OP_HW_MTPR_TERM;
@@ -386,6 +392,8 @@ CJitEngine::CJitEngine(int cpu_id) : m_cpu_id(cpu_id), m_recorded(0), m_code_byt
   m_stat_compiled = m_stat_plen_sum = m_stat_code_bytes = 0;
   m_stat_wall_last_ns = (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::steady_clock::now().time_since_epoch()).count();
+  m_tsc_compiled = m_tsc_interp = 0;
+  m_tsc_window_start = jit_rdtsc();
   memset(m_term_op, 0, sizeof(m_term_op));
   memset(m_pal_func, 0, sizeof(m_pal_func));
   memset(m_mtpr_func, 0, sizeof(m_mtpr_func));
@@ -1997,10 +2005,12 @@ static const char* opcode_name(unsigned op)
   }
 }
 
-uint64_t CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr)
+uint64_t CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr, uint64_t comp_tsc, uint64_t interp_tsc)
 {
   m_stat_native += native_instr;
   m_stat_interp += interp_instr;
+  m_tsc_compiled += comp_tsc;         // host cycles spent in b->code() (compiled chains)
+  m_tsc_interp   += interp_tsc;       // host cycles spent in the interp fallback loop
   if (native_instr) m_stat_hot++;     // one compiled-chain dispatch
   if (interp_instr) m_stat_miss++;    // one interpreted (cold/uncompilable) block
   const uint64_t total = m_stat_native + m_stat_interp;
@@ -2009,6 +2019,7 @@ uint64_t CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr)
   // Time this report's own blocking I/O so the caller can exclude it from the wall-clock-pinned
   // RPCC -- else the printf stall is billed to the guest cycle counter as a forward jump.
   const auto stat_t0 = std::chrono::steady_clock::now();
+  const uint64_t win_tsc = jit_rdtsc() - m_tsc_window_start;   // window's host cycles (time-split denominator)
 #ifdef JIT_REGPROF
   regprof_report();   // exec-weighted GPR histogram for pin selection (I/O timed within this window)
 #endif
@@ -2032,6 +2043,15 @@ uint64_t CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr)
   const double   expand = m_stat_plen_sum ? (double) m_stat_code_bytes / (double) m_stat_plen_sum : 0.0;
   printf("[JIT][STATS][CPU%d] throughput %.0f MIPS (%llu instr / %.1f ms) | %.1f x86-bytes/instr (static avg)\n",
          m_cpu_id, mips, (unsigned long long) total, (double) dt_ns / 1e6, expand);
+  // Wall-time split (host TSC): where the window actually spent time -- compiled execution vs interp
+  // fallback vs the dispatcher/chaining remainder. Separates the two bottleneck candidates the
+  // instruction counts can't (chain length and interp rate both just track how hot/covered the code is).
+  if (win_tsc) {
+    const double cf  = 100.0 * (double) m_tsc_compiled / (double) win_tsc;
+    const double itf = 100.0 * (double) m_tsc_interp   / (double) win_tsc;
+    printf("[JIT][STATS][CPU%d] time-split: compiled %.1f%% | interp %.1f%% | dispatch %.1f%%\n",
+           m_cpu_id, cf, itf, (cf + itf < 100.0) ? (100.0 - cf - itf) : 0.0);
+  }
   len = snprintf(buf, sizeof(buf), "[JIT][STATS][CPU%d] %llu recorded, %llu compiled (avg %.1f instr) | block-breakers:",
                  m_cpu_id, (unsigned long long) m_recorded, (unsigned long long) m_stat_compiled, avgpl);
   uint64_t hist[64];
@@ -2089,6 +2109,8 @@ uint64_t CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr)
            (unsigned long long) m_misc_func[0xf]);
   }
   m_stat_native = m_stat_interp = m_stat_hot = m_stat_miss = 0;   // reset the window
+  m_tsc_compiled = m_tsc_interp = 0;
+  m_tsc_window_start = jit_rdtsc();   // next window's split denominator starts after this report's I/O
   const auto stat_end = std::chrono::steady_clock::now();
   m_stat_wall_last_ns = (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
       stat_end.time_since_epoch()).count();   // next window's throughput delta starts after this I/O
