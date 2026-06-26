@@ -394,6 +394,7 @@ CJitEngine::CJitEngine(int cpu_id) : m_cpu_id(cpu_id), m_recorded(0), m_code_byt
       std::chrono::steady_clock::now().time_since_epoch()).count();
   m_tsc_compiled = m_tsc_interp = 0;
   m_tsc_window_start = jit_rdtsc();
+  m_bail_link = m_jmp_attempt = m_jmp_hit = 0;
   memset(m_term_op, 0, sizeof(m_term_op));
   memset(m_pal_func, 0, sizeof(m_pal_func));
   memset(m_mtpr_func, 0, sizeof(m_mtpr_func));
@@ -2052,6 +2053,18 @@ uint64_t CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr, uin
     printf("[JIT][STATS][CPU%d] time-split: compiled %.1f%% | interp %.1f%% | dispatch %.1f%%\n",
            m_cpu_id, cf, itf, (cf + itf < 100.0) ? (100.0 - cf - itf) : 0.0);
   }
+  // Bail-cause: of the compiled-chain dispatches (m_stat_hot), how many bailed via a cached-link miss
+  // (branches/fall-through) vs a jit_indirect miss (computed jumps) vs gate/other (budget/interrupt/
+  // mid-block fault = remainder). Pinpoints whether the branch link is the dispatch lever.
+  if (m_stat_hot) {
+    const uint64_t jmp_bail = (m_jmp_attempt > m_jmp_hit) ? (m_jmp_attempt - m_jmp_hit) : 0;
+    const uint64_t other = (m_stat_hot > m_bail_link + jmp_bail) ? (m_stat_hot - m_bail_link - jmp_bail) : 0;
+    printf("[JIT][STATS][CPU%d] bail-cause: link %.0f%% | jump %.0f%% | gate/other %.0f%% (of %llu) | jump chain-rate %.0f%%\n",
+           m_cpu_id, 100.0 * (double) m_bail_link / (double) m_stat_hot,
+           100.0 * (double) jmp_bail / (double) m_stat_hot, 100.0 * (double) other / (double) m_stat_hot,
+           (unsigned long long) m_stat_hot,
+           m_jmp_attempt ? 100.0 * (double) m_jmp_hit / (double) m_jmp_attempt : 0.0);
+  }
   len = snprintf(buf, sizeof(buf), "[JIT][STATS][CPU%d] %llu recorded, %llu compiled (avg %.1f instr) | block-breakers:",
                  m_cpu_id, (unsigned long long) m_recorded, (unsigned long long) m_stat_compiled, avgpl);
   uint64_t hist[64];
@@ -2111,6 +2124,7 @@ uint64_t CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr, uin
   m_stat_native = m_stat_interp = m_stat_hot = m_stat_miss = 0;   // reset the window
   m_tsc_compiled = m_tsc_interp = 0;
   m_tsc_window_start = jit_rdtsc();   // next window's split denominator starts after this report's I/O
+  m_bail_link = m_jmp_attempt = m_jmp_hit = 0;
   const auto stat_end = std::chrono::steady_clock::now();
   m_stat_wall_last_ns = (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
       stat_end.time_since_epoch()).count();   // next window's throughput delta starts after this I/O

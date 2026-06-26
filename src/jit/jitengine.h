@@ -124,6 +124,19 @@ public:
   inline void     note_itb_invalidate() { ++m_itb_gen; }
   inline uint64_t vgen() const          { return m_itb_gen + m_flush_gen; }   // combined validation epoch
 
+  // Bail-cause counters (JIT_STATS): why a compiled chain returned to the dispatcher -- a branch/
+  // fall-through cached-link miss vs a computed-jump (jit_indirect) miss. Empty when stats are off,
+  // so the call sites need no #ifdef.
+#ifdef JIT_STATS
+  void note_link_bail()   { m_bail_link++; }
+  void note_jmp_attempt() { m_jmp_attempt++; }
+  void note_jmp_hit()     { m_jmp_hit++; }
+#else
+  void note_link_bail()   {}
+  void note_jmp_attempt() {}
+  void note_jmp_hit()     {}
+#endif
+
 #ifdef JIT_VERIFY
   // Differential check: compiled result (jit) vs interpreter result (interp), r[0..30]. Returns the
   // ns spent in its periodic progress printf (0 otherwise) so the dispatcher can exclude that stall
@@ -170,6 +183,7 @@ private:
   uint64_t m_stat_wall_last_ns;                 // steady_clock ns at the last window report (throughput delta)
   uint64_t m_tsc_compiled, m_tsc_interp;        // windowed: host TSC cycles in b->code() vs interp fallback
   uint64_t m_tsc_window_start;                  // host TSC at window start (the time-split denominator)
+  uint64_t m_bail_link, m_jmp_attempt, m_jmp_hit;   // windowed: link-miss bails, jit_indirect attempts/hits
   uint64_t m_term_op[64];                       // cumulative: opcode that ended a block's compiled prefix
   uint64_t m_pal_func[256];                     // cumulative: CALL_PAL function code that ended a block
   uint64_t m_mtpr_func[256];                    // cumulative: HW_MTPR (0x1d) IPR index that ended a block

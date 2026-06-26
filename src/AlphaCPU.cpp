@@ -1083,7 +1083,7 @@ void CAlphaCPU::jit_run(int budget)
 			// A predecessor block's epilogue cache-missed and asked to be linked here. Now
 			// that we know this block is live and compiled, patch its successor pointer so it
 			// jumps straight in instead of returning
-			if (m_link_from) { ((CJitEngine::JitBlock*) m_link_from)->link = b; m_link_from = nullptr; }
+			if (m_link_from) { m_jit->note_link_bail(); ((CJitEngine::JitBlock*) m_link_from)->link = b; m_link_from = nullptr; }
 			m_jit_budget = budget;   // ceiling for compiled chains (epilogue stops at it)
 #ifdef JIT_STATS
 			const uint64_t _comp_t0 = jit_rdtsc();
@@ -1111,7 +1111,8 @@ void CAlphaCPU::jit_run(int budget)
 
 		// Miss path (cold): the up-front translation gave start_phys/start_asm (when have_phys).
 		// We're not running a compiled block here, so drop any pending link request, interpret
-		// the block, record it, and compile its prefix.
+		// the block, record it, and compile its prefix. Count the link-miss bail before dropping it.
+		if (m_link_from) m_jit->note_link_bail();
 		m_link_from = nullptr;
 		u32 n = 0;
 		u64 expected = start_virt;
@@ -1794,6 +1795,7 @@ void CAlphaCPU::jit_hw_mtpr(CAlphaCPU* cpu, u32 function, u64 value)
 // any number of distinct targets chain without the old single-slot link thrashing on varying jumps.
 void* CAlphaCPU::jit_indirect(CAlphaCPU* cpu, u64 target)
 {
+	cpu->m_jit->note_jmp_attempt();
 	CJitEngine::JitBlock* b = cpu->m_jit->lookup(target, (u32) cpu->state.asn);
 	if (!b || !b->jit_body) return nullptr;
 	if (target & 1)
@@ -1801,13 +1803,15 @@ void* CAlphaCPU::jit_indirect(CAlphaCPU* cpu, u64 target)
 		// PALmode target: the I-stream is physically addressed (not paged), so no remap / no stale
 		// risk. A PALmode block's shadow-register remap assumes SDE -- honor the dispatcher's guard.
 		if (!cpu->state.sde) return nullptr;
-		return b->jit_body;
+		cpu->m_jit->note_jmp_hit(); return b->jit_body;
 	}
 	// Native target. FAST PATH: validated under the current epoch (lookup proved flush-fresh, so a
 	// vgen mismatch here means an ITB invalidate) -- chain with no re-translation.
 	const u64 gen = cpu->m_jit->vgen();
 	if (b->vgen == gen)
-		return b->jit_body;
+	{
+		cpu->m_jit->note_jmp_hit(); return b->jit_body;
+	}
 	// SLOW PATH (only right after an ITB invalidate): the in-frame chain bypasses the dispatcher's
 	// `b->phys == start_phys` staleness check (see the hot-path). Virtual+ASN keying can't see a 
 	// page remap, so a stale block (same tag+ASN, but the vpage now maps different physical bytes) 
@@ -1826,7 +1830,7 @@ void* CAlphaCPU::jit_indirect(CAlphaCPU* cpu, u64 target)
 		return nullptr;
 	}
 	b->vgen = gen;                                             // re-validated -> fast path henceforth
-	return b->jit_body;
+	cpu->m_jit->note_jmp_hit(); return b->jit_body;
 }
 #endif
 
