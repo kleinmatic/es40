@@ -853,12 +853,9 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       a.imul(x86::r11, x86::r11, imm(m_off.dpc_stride));                // r11 = slot byte offset
       a.mov(x86::r10, x86::rdx);
       a.and_(x86::r10, imm(-0x2000));                                   // r10 = va & ~0x1FFF
-      a.cmp(x86::byte_ptr(x86::rbp, x86::r11, 0, m_off.dpc_valid), imm(0));         a.je(slow);
       a.cmp(x86::qword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_virt_page), x86::r10);  a.jne(slow);
-      a.mov(x86::eax, x86::dword_ptr(x86::rbp, m_off.state_cm));
-      a.cmp(x86::dword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_cm), x86::eax);         a.jne(slow);
-      a.mov(x86::eax, x86::dword_ptr(x86::rbp, m_off.state_asn0));
-      a.cmp(x86::dword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_asn), x86::eax);        a.jne(slow);
+      a.mov(x86::rax, x86::qword_ptr(x86::rbp, m_off.state_cm));                    // rax = {cm, asn0} (adjacent in state)
+      a.cmp(x86::qword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_cm), x86::rax);         a.jne(slow);   // vs slot {cm, asn}
       a.mov(x86::r10, x86::qword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_host_base));  // r10 = host page base (0 = MMIO/none)
       a.test(x86::r10, x86::r10);                                      a.jz(slow);  // MMIO/straddle: device read via helper
       a.mov(x86::rax, x86::rdx);
@@ -915,12 +912,9 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       a.add(x86::r11, imm(m_off.dpc_write_row));                        // -> write cache [1]
       a.mov(x86::r10, x86::rdx);
       a.and_(x86::r10, imm(-0x2000));                                   // r10 = va & ~0x1FFF
-      a.cmp(x86::byte_ptr(x86::rbp, x86::r11, 0, m_off.dpc_valid), imm(0));         a.je(slow);
       a.cmp(x86::qword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_virt_page), x86::r10);  a.jne(slow);
-      a.mov(x86::eax, x86::dword_ptr(x86::rbp, m_off.state_cm));
-      a.cmp(x86::dword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_cm), x86::eax);         a.jne(slow);
-      a.mov(x86::eax, x86::dword_ptr(x86::rbp, m_off.state_asn0));
-      a.cmp(x86::dword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_asn), x86::eax);        a.jne(slow);
+      a.mov(x86::rax, x86::qword_ptr(x86::rbp, m_off.state_cm));                    // rax = {cm, asn0} (adjacent in state)
+      a.cmp(x86::qword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_cm), x86::rax);         a.jne(slow);   // vs slot {cm, asn}
       a.mov(x86::r10, x86::qword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_host_base));  // r10 = host page base (0 = MMIO/none)
       a.test(x86::r10, x86::r10);                                      a.jz(slow);  // MMIO/straddle: device write via helper
       a.mov(x86::rax, x86::rdx);
@@ -991,12 +985,9 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       if (!isload) a.add(x86::r11, imm(m_off.dpc_write_row));                                    // store -> write cache [1]
       a.mov(x86::r10, x86::rdx);
       a.and_(x86::r10, imm(-0x2000));
-      a.cmp(x86::byte_ptr(x86::rbp, x86::r11, 0, m_off.dpc_valid), imm(0));        a.je(slow);
       a.cmp(x86::qword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_virt_page), x86::r10); a.jne(slow);
-      a.mov(x86::eax, x86::dword_ptr(x86::rbp, m_off.state_cm));
-      a.cmp(x86::dword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_cm), x86::eax);        a.jne(slow);
-      a.mov(x86::eax, x86::dword_ptr(x86::rbp, m_off.state_asn0));
-      a.cmp(x86::dword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_asn), x86::eax);       a.jne(slow);
+      a.mov(x86::rax, x86::qword_ptr(x86::rbp, m_off.state_cm));                   // rax = {cm, asn0} (adjacent in state)
+      a.cmp(x86::qword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_cm), x86::rax);        a.jne(slow);   // vs slot {cm, asn}
       a.mov(x86::r10, x86::qword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_host_base));  // r10 = host page base (0 = MMIO/none)
       a.test(x86::r10, x86::r10);                                                  a.jz(slow);   // MMIO/straddle -> helper
       a.mov(x86::rax, x86::rdx);

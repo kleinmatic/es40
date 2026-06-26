@@ -486,6 +486,8 @@ private:
     for (int i = 0; i < kDpcEntries; i++) {
       data_page_cache[0][i].valid = false;
       data_page_cache[1][i].valid = false;
+      data_page_cache[0][i].host_base = 0;   // valid==false => host_base==0, so the JIT can drop its valid load
+      data_page_cache[1][i].host_base = 0;
     }
   }
 
@@ -557,8 +559,9 @@ private:
     std::atomic<bool> check_timers; /**< Delayed-irq countdown pending; set cross-thread by irq_h() */
     bool  fpen;           /**< IPR PCTX: fpe (floating point enable) [HRM p 5-21..23] */
     int   cm;           /**< IPR IER_CM: cm (current mode) [HRM p 5-9..10] */
+    int   asn0;         /**< IPR DTB_ASN0: data ASN [HRM p 5-28]. Kept right after cm so the JIT dpc
+                             check loads {cm,asn0} as one 8-byte compare vs the slot's {cm,asn}. */
     int   asn;          /**< IPR PCTX: asn (address space number) [HRM p 5-21..22] */
-    int   asn0;         /**< IPR DTB_ASN0: asn (address space number) [HRM p 5-28] */
     u64   exc_addr;     /**< IPR EXC_ADDR: address of last exception [HRM p 5-8] */
 
     u64   r[64];          /**< Integer registers (0-31 normal, 32-63 shadow) */

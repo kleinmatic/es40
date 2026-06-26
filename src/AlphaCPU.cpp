@@ -854,6 +854,12 @@ void CAlphaCPU::jit_run(int budget)
 			memcpy(snap, state.r, sizeof(snap));
 			u64 f_pre[64];  // FP file before the interp pass -- restored before the compiled pass below
 			memcpy(f_pre, state.f, sizeof(f_pre));   // so the compiled FP ops read the same f[] the interp did
+				// I_CTL is read-modify-written within one compiled prefix (HW_MFPR I_CTL ... HW_MTPR I_CTL,
+				// a terminator): the interp pass writes it before the compiled pass reads it. Snapshot its
+				// fields here and restore them before b->code() below -- like snap/f_pre do for GPRs/FP.
+				const bool ictl_sde_pre = state.sde, ictl_hwe_pre = state.hwe;
+				const int  ictl_spe_pre = state.i_ctl_spe, ictl_vam_pre = state.i_ctl_va_mode;
+				const u64  ictl_vptb_pre = state.i_ctl_vptb, ictl_other_pre = state.i_ctl_other;
 			const u32* vw = (const u32*) ((const u8*) dram_ptr + b->phys);
 			u32 vn = 0;   // loads recorded for replay
 			u32 sn = 0;   // stores recorded for the compiled-pass compare
@@ -979,7 +985,8 @@ void CAlphaCPU::jit_run(int budget)
 				// HW_MTPR verify: a compiled block writes IPR fields directly in LIVE state (its GPR
 				// writes go to jr scratch). Snapshot the writable IPR set after the interp pass
 				// (authoritative); below we compare the compiled pass's IPR writes and roll the live
-				// fields back. Pure stores -> no pre-pass reset. Keep this list in sync with jit_hw_mtpr.
+				// fields back. Mostly pure stores; I_CTL is read-modify-written, so it's also reset pre-pass
+					// (ictl_*_pre, above). Keep this list in sync with jit_hw_mtpr.
 				auto cap_iprs = [&](u64* d) {
 					d[0] = state.last_tb_virt; d[1] = last_dtb_virt[0]; d[2] = last_dtb_virt[1];
 					d[3] = state.pctr_ctl; d[4] = state.dc_ctl; d[5] = (u64) state.cc_offset; d[6] = (u64) (u32) state.alt_cm;
@@ -1012,6 +1019,9 @@ void CAlphaCPU::jit_run(int budget)
 				u64 jr[64];   // 64: a compiled PALmode block may touch the shadow bank
 				memcpy(jr, snap, sizeof(jr));
 				memcpy(state.f, f_pre, sizeof(f_pre));   // restore the FP file like the GPRs: the compiled pass reads pre-interp f
+					state.sde = ictl_sde_pre; state.hwe = ictl_hwe_pre;   // restore I_CTL too: a compiled HW_MFPR must read the pre-interp value
+					state.i_ctl_spe = ictl_spe_pre; state.i_ctl_va_mode = ictl_vam_pre;
+					state.i_ctl_vptb = ictl_vptb_pre; state.i_ctl_other = ictl_other_pre;
 				const u64 interp_pc = state.pc;   // interpreter is authoritative for the PC
 				m_jit_vreplay = true;
 				m_jit_vlog_i = 0;
