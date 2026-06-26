@@ -34,9 +34,10 @@ class CAlphaCPU;   // compiled blocks call back into the CPU for memory accesses
 class CJitEngine
 {
 public:
-  // 64K slots: the OS-active CPU's block working set (50K+) thrashed the old 16K direct-mapped
-  // cache -- conflict evictions caused ~190K recompiles per 100M instructions on that CPU.
-  static constexpr int      kCacheBits = 16;
+  // 256K slots: the OS-active CPU's block working set (50K+) thrashed the old 16K direct-mapped cache
+  // (~190K recompiles/100M); 64K cut that to ~14K/100M, but a 50K set in 64K slots still conflict-evicts
+  // (load ~0.8). 256K drops the load to ~0.2. JitBlock ~110 B -> ~28 MB/CPU of metadata.
+  static constexpr int      kCacheBits = 18;
   static constexpr int      kCacheEntries = 1 << kCacheBits;
   static constexpr uint64_t kIndexMask = (uint64_t) kCacheEntries - 1;
 
@@ -184,6 +185,7 @@ private:
   uint64_t m_tsc_compiled, m_tsc_interp;        // windowed: host TSC cycles in b->code() vs interp fallback
   uint64_t m_tsc_window_start;                  // host TSC at window start (the time-split denominator)
   uint64_t m_bail_link, m_jmp_attempt, m_jmp_hit;   // windowed: link-miss bails, jit_indirect attempts/hits
+  uint64_t m_fresh_cold, m_fresh_tag, m_fresh_asn, m_fresh_phys, m_fresh_hash;  // windowed: record() step-4 fresh-compile reason
   uint64_t m_term_op[64];                       // cumulative: opcode that ended a block's compiled prefix
   uint64_t m_pal_func[256];                     // cumulative: CALL_PAL function code that ended a block
   uint64_t m_mtpr_func[256];                    // cumulative: HW_MTPR (0x1d) IPR index that ended a block

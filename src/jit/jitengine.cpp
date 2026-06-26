@@ -395,6 +395,7 @@ CJitEngine::CJitEngine(int cpu_id) : m_cpu_id(cpu_id), m_recorded(0), m_code_byt
   m_tsc_compiled = m_tsc_interp = 0;
   m_tsc_window_start = jit_rdtsc();
   m_bail_link = m_jmp_attempt = m_jmp_hit = 0;
+  m_fresh_cold = m_fresh_tag = m_fresh_asn = m_fresh_phys = m_fresh_hash = 0;
   memset(m_term_op, 0, sizeof(m_term_op));
   memset(m_pal_func, 0, sizeof(m_pal_func));
   memset(m_mtpr_func, 0, sizeof(m_mtpr_func));
@@ -454,6 +455,16 @@ CJitEngine::JitBlock* CJitEngine::record(uint64_t virt_pc, uint64_t phys_pc, uin
     return &b;
   }
   // New block, page remap, or modified bytes: record fresh and force a recompile.
+#ifdef JIT_STATS
+  // Why is this a FRESH compile (steps 2+3 both failed)? Categorize the slot's prior occupant in the
+  // same order step 3 checks, so we know whether the churn is cache aliasing (tag) -- which more slots
+  // fix -- vs same-PC cross-process (asn) -- which needs asn in the index -- vs remap/self-mod/cold.
+  if      (!b.code)                         m_fresh_cold++;   // empty / reclaimed slot (genuine cold or warmup)
+  else if (b.tag != virt_pc)                m_fresh_tag++;    // a DIFFERENT block aliases this slot (cache-size lever)
+  else if (!(b.asm_global || b.asn == asn)) m_fresh_asn++;    // same PC, different process (needs asn-in-index)
+  else if (b.phys != phys_pc)               m_fresh_phys++;   // page remap
+  else                                      m_fresh_hash++;   // source bytes changed (self-modifying code)
+#endif
   b.tag = virt_pc;
   b.phys = phys_pc;
   b.asn = asn;
@@ -480,10 +491,16 @@ CJitEngine::JitBlock* CJitEngine::record(uint64_t virt_pc, uint64_t phys_pc, uin
 CJitEngine::JitBlock* CJitEngine::revalidate_flushed(uint64_t virt_pc, uint32_t asn, uint64_t phys_pc, const uint8_t* dram)
 {
   JitBlock& b = m_blocks[index_of(virt_pc)];
-  if (!(b.valid && b.code && b.tag == virt_pc && (b.asm_global || b.asn == asn)))
+  // Resurrect BOTH lazy-flush survivors (flush(): valid, flush_gen-stale) AND flush_non_global() drops
+  // (valid cleared). The source-hash below is the guard, matching record()'s revalidate path
+  // so don't require valid flags; requiring it forced every flush_non_global'd block through an
+  // interpret pass. tag/asn/phys/hash still guard collisions, cross-process aliasing, page remaps, 
+  // and self-modifying code.
+  if (!(b.code && b.tag == virt_pc && (b.asm_global || b.asn == asn)))
     return nullptr;
   if (b.phys != phys_pc || b.src_sum != src_hash(dram + phys_pc, b.hash_len))
     return nullptr;
+  b.valid = true;          // flush_non_global() may have cleared it; the hash just re-validated the bytes
   b.flush_gen = m_flush_gen;
   b.vgen = m_itb_gen + m_flush_gen;   // phys + code bytes just validated
   b.jit_body = (void*) ((uint8_t*) (void*) b.code + b.body_off);
@@ -520,7 +537,9 @@ void CJitEngine::flush()
 }
 
 // ASM-bit-clear icache flush (process/ASN switch): drop only !asm_global blocks. Global (ASM) PAL
-// blocks are ASN-independent and must survive it. Past the reclaim cap, defer to the full flush().
+// blocks are ASN-independent and must survive it. The drop is SOFT, revalidate_flushed() re-hashes
+// and resurrects the compiled code on next use (no recompile, no interpret pass, unless the bytes
+// actually changed)
 void CJitEngine::flush_non_global()
 {
   if (m_rt && m_code_bytes >= kReclaimBytes) { flush(); return; }
@@ -2065,6 +2084,14 @@ uint64_t CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr, uin
            (unsigned long long) m_stat_hot,
            m_jmp_attempt ? 100.0 * (double) m_jmp_hit / (double) m_jmp_attempt : 0.0);
   }
+  // Fresh-compile reason (per window): tag=cache aliasing, asn=cross-process same-PC, phys=remap,
+  // hash=self-mod, cold=genuine new/warmup. Sums to the window's `recorded` growth (the churn cost).
+  const uint64_t fresh = m_fresh_tag + m_fresh_asn + m_fresh_phys + m_fresh_hash + m_fresh_cold;
+  if (fresh)
+    printf("[JIT][STATS][CPU%d] fresh-cause: tag %llu | asn %llu | phys %llu | hash %llu | cold %llu (of %llu recompiled)\n",
+           m_cpu_id, (unsigned long long) m_fresh_tag, (unsigned long long) m_fresh_asn,
+           (unsigned long long) m_fresh_phys, (unsigned long long) m_fresh_hash,
+           (unsigned long long) m_fresh_cold, (unsigned long long) fresh);
   len = snprintf(buf, sizeof(buf), "[JIT][STATS][CPU%d] %llu recorded, %llu compiled (avg %.1f instr) | block-breakers:",
                  m_cpu_id, (unsigned long long) m_recorded, (unsigned long long) m_stat_compiled, avgpl);
   uint64_t hist[64];
@@ -2125,6 +2152,7 @@ uint64_t CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr, uin
   m_tsc_compiled = m_tsc_interp = 0;
   m_tsc_window_start = jit_rdtsc();   // next window's split denominator starts after this report's I/O
   m_bail_link = m_jmp_attempt = m_jmp_hit = 0;
+  m_fresh_cold = m_fresh_tag = m_fresh_asn = m_fresh_phys = m_fresh_hash = 0;
   const auto stat_end = std::chrono::steady_clock::now();
   m_stat_wall_last_ns = (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
       stat_end.time_since_epoch()).count();   // next window's throughput delta starts after this I/O
