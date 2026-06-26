@@ -459,6 +459,7 @@ void CAlphaCPU::init()
 		o.dpc_valid     = (uint32_t) ((char*) &data_page_cache[0][0].valid     - (char*) this);
 		o.dpc_virt_page = (uint32_t) ((char*) &data_page_cache[0][0].virt_page - (char*) this);
 		o.dpc_phys_base = (uint32_t) ((char*) &data_page_cache[0][0].phys_base - (char*) this);
+		o.dpc_host_base = (uint32_t) ((char*) &data_page_cache[0][0].host_base - (char*) this);
 		o.dpc_cm        = (uint32_t) ((char*) &data_page_cache[0][0].cm        - (char*) this);
 		o.dpc_asn       = (uint32_t) ((char*) &data_page_cache[0][0].asn       - (char*) this);
 		o.dpc_stride    = (uint32_t) sizeof(data_page_cache[0][0]);
@@ -1148,6 +1149,7 @@ int CAlphaCPU::jit_read(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 		phys = e.phys | (va & e.keep_mask);
 		dpc.virt_page = vp;
 		dpc.phys_base = phys & ~U64(0x1FFF);
+		dpc.host_base = ((phys | U64(0x1FFF)) < cpu->dram_size) ? ((u64) cpu->dram_ptr + (phys & ~U64(0x1FFF))) : 0;
 		dpc.cm  = cpu->state.cm;
 		dpc.asn = cpu->state.asn0;
 		dpc.valid = true;
@@ -1382,6 +1384,7 @@ int CAlphaCPU::jit_read_locked(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 		phys = e.phys | (va & e.keep_mask);
 		dpc.virt_page = vp;
 		dpc.phys_base = phys & ~U64(0x1FFF);
+		dpc.host_base = ((phys | U64(0x1FFF)) < cpu->dram_size) ? ((u64) cpu->dram_ptr + (phys & ~U64(0x1FFF))) : 0;
 		dpc.cm  = cpu->state.cm;
 		dpc.asn = cpu->state.asn0;
 		dpc.valid = true;
@@ -1521,6 +1524,7 @@ int CAlphaCPU::jit_write(CAlphaCPU* cpu, u64 va, int size_bits, u64 value)
 		phys = e.phys | (va & e.keep_mask);
 		dpc.virt_page = vp;
 		dpc.phys_base = phys & ~U64(0x1FFF);
+		dpc.host_base = ((phys | U64(0x1FFF)) < cpu->dram_size) ? ((u64) cpu->dram_ptr + (phys & ~U64(0x1FFF))) : 0;
 		dpc.cm  = cpu->state.cm;
 		dpc.asn = cpu->state.asn0;
 		dpc.valid = true;
@@ -1602,6 +1606,7 @@ u64 CAlphaCPU::jit_stc(CAlphaCPU* cpu, u64 va, int size_bits, u64 value)
 		phys = e.phys | (va & e.keep_mask);
 		dpc.virt_page = vp;
 		dpc.phys_base = phys & ~U64(0x1FFF);
+		dpc.host_base = ((phys | U64(0x1FFF)) < cpu->dram_size) ? ((u64) cpu->dram_ptr + (phys & ~U64(0x1FFF))) : 0;
 		dpc.cm  = cpu->state.cm;
 		dpc.asn = cpu->state.asn0;
 		dpc.valid = true;

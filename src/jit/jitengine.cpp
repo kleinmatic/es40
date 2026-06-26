@@ -859,12 +859,10 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       a.cmp(x86::dword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_cm), x86::eax);         a.jne(slow);
       a.mov(x86::eax, x86::dword_ptr(x86::rbp, m_off.state_asn0));
       a.cmp(x86::dword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_asn), x86::eax);        a.jne(slow);
-      a.mov(x86::rax, x86::qword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_phys_base));
-      a.mov(x86::r10, x86::rdx);
-      a.and_(x86::r10, imm(0x1FFF));
-      a.or_(x86::rax, x86::r10);                                        // rax = phys
-      a.cmp(x86::rax, x86::qword_ptr(x86::rbp, m_off.dram_size));       a.jae(slow);
-      a.mov(x86::r10, x86::qword_ptr(x86::rbp, m_off.dram_ptr));
+      a.mov(x86::r10, x86::qword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_host_base));  // r10 = host page base (0 = MMIO/none)
+      a.test(x86::r10, x86::r10);                                      a.jz(slow);  // MMIO/straddle: device read via helper
+      a.mov(x86::rax, x86::rdx);
+      a.and_(x86::rax, imm(0x1FFF));                                   // rax = page offset
       if (op == OP_LDQ || op == OP_LDQ_U) a.mov(x86::rax, x86::qword_ptr(x86::r10, x86::rax));  // LDQ/LDQ_U: full quad
       else if (op == OP_LDL)  a.movsxd(x86::rax, x86::dword_ptr(x86::r10, x86::rax));
       else if (op == OP_LDWU) a.movzx(x86::eax, x86::word_ptr(x86::r10, x86::rax));   // BWX: zero-extend
@@ -923,14 +921,12 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       a.cmp(x86::dword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_cm), x86::eax);         a.jne(slow);
       a.mov(x86::eax, x86::dword_ptr(x86::rbp, m_off.state_asn0));
       a.cmp(x86::dword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_asn), x86::eax);        a.jne(slow);
-      a.mov(x86::rax, x86::qword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_phys_base));
-      a.mov(x86::r10, x86::rdx);
-      a.and_(x86::r10, imm(0x1FFF));
-      a.or_(x86::rax, x86::r10);                                        // rax = phys
-      a.cmp(x86::rax, x86::qword_ptr(x86::rbp, m_off.dram_size));       a.jae(slow);
+      a.mov(x86::r10, x86::qword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_host_base));  // r10 = host page base (0 = MMIO/none)
+      a.test(x86::r10, x86::r10);                                      a.jz(slow);  // MMIO/straddle: device write via helper
+      a.mov(x86::rax, x86::rdx);
+      a.and_(x86::rax, imm(0x1FFF));                                   // rax = page offset
       if (ra == 31)  a.xor_(x86::r9d, x86::r9d);                        // value -> R9 (R31 == 0)
       else           mov_from_reg(x86::r9, ra);
-      a.mov(x86::r10, x86::qword_ptr(x86::rbp, m_off.dram_ptr));
       if      (op == OP_STQ || op == OP_STQ_U) a.mov(x86::qword_ptr(x86::r10, x86::rax), x86::r9);   // full quad
       else if (op == OP_STL)                   a.mov(x86::dword_ptr(x86::r10, x86::rax), x86::r9d);
       else if (op == OP_STW)                   a.mov(x86::word_ptr(x86::r10, x86::rax), x86::r9w);
@@ -1001,12 +997,10 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       a.cmp(x86::dword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_cm), x86::eax);        a.jne(slow);
       a.mov(x86::eax, x86::dword_ptr(x86::rbp, m_off.state_asn0));
       a.cmp(x86::dword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_asn), x86::eax);       a.jne(slow);
-      a.mov(x86::rax, x86::qword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_phys_base));
-      a.mov(x86::r10, x86::rdx);
-      a.and_(x86::r10, imm(0x1FFF));
-      a.or_(x86::rax, x86::r10);                                                   // rax = phys
-      a.cmp(x86::rax, x86::qword_ptr(x86::rbp, m_off.dram_size));                  a.jae(slow);
-      a.mov(x86::r10, x86::qword_ptr(x86::rbp, m_off.dram_ptr));
+      a.mov(x86::r10, x86::qword_ptr(x86::rbp, x86::r11, 0, m_off.dpc_host_base));  // r10 = host page base (0 = MMIO/none)
+      a.test(x86::r10, x86::r10);                                                  a.jz(slow);   // MMIO/straddle -> helper
+      a.mov(x86::rax, x86::rdx);
+      a.and_(x86::rax, imm(0x1FFF));                                               // rax = page offset
       if (isload) {                                                               // LDT: f[fa] = MEM[phys]
         a.mov(x86::rax, x86::qword_ptr(x86::r10, x86::rax));
         a.mov(x86::qword_ptr(x86::rbp, m_off.f_base + fa * 8), x86::rax);

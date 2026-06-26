@@ -72,7 +72,7 @@ public:
   // Byte offsets (from the CAlphaCPU*) of the fields the inline load fast path reads,
   // so compiled code can touch them via [rsi + offset]. Filled once by set_offsets().
   struct JitOffsets {
-    uint32_t dpc_valid, dpc_virt_page, dpc_phys_base, dpc_cm, dpc_asn;  // offsets of READ slot [0][0]
+    uint32_t dpc_valid, dpc_virt_page, dpc_phys_base, dpc_host_base, dpc_cm, dpc_asn;  // offsets of READ slot [0][0]
     uint32_t dpc_stride, dpc_mask;   // direct-mapped page cache: per-slot byte stride, index mask
     uint32_t dpc_write_row;          // byte distance from read cache [0] to write cache [1] (store fast path)
     uint32_t state_cm, state_asn0, dram_ptr, dram_size, state_pc;

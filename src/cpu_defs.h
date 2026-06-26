@@ -552,6 +552,8 @@ inline u64 fsqrt64(u64 asig, s32 exp)
           ES40_EXECUTE_END();                                                   \
         _dpc.virt_page = _dpc_vp;                                               \
         _dpc.phys_base = phys_address & ~U64(0x1FFF);                           \
+        _dpc.host_base = ((phys_address | U64(0x1FFF)) < dram_size)                 \
+                         ? ((u64) dram_ptr + (phys_address & ~U64(0x1FFF))) : 0;    \
         _dpc.cm        = state.cm;                                              \
         _dpc.asn       = state.asn0;                                            \
         _dpc.valid     = true;                                                  \

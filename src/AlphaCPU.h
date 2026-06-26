@@ -476,6 +476,7 @@ private:
   struct SDataPageCache {
     u64  virt_page;   // va & ~0x1FFF
     u64  phys_base;   // pa & ~0x1FFF
+    u64  host_base;   // dram_ptr + phys_base for DRAM pages, 0 for MMIO (JIT inline fast path)
     int  cm;          // current mode (CM) at fill time
     int  asn;         // data ASN (asn0) at fill time
     bool valid;
