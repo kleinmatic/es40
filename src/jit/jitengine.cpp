@@ -388,6 +388,7 @@ static const char* opcode_name(unsigned op);
 CJitEngine::CJitEngine(int cpu_id) : m_cpu_id(cpu_id), m_recorded(0), m_code_bytes(0), m_rt(nullptr)
 {
   memset(m_blocks, 0, sizeof(m_blocks));    // flush() is lazy (gen bump) -- zero the slots here
+  memset(m_traces, 0, sizeof(m_traces));    // trace tier: empty for now (m_traces_enabled stays false)
   m_rt = new asmjit::JitRuntime();
 #ifdef JIT_VERIFY
   m_v_exec = m_v_fail = 0;
@@ -510,6 +511,31 @@ CJitEngine::JitBlock* CJitEngine::revalidate_flushed(uint64_t virt_pc, uint32_t 
   b.vgen = m_itb_gen + m_flush_gen;   // phys + code bytes just validated
   b.jit_body = (void*) ((uint8_t*) (void*) b.code + b.body_off);
   return &b;
+}
+
+// Trace tier - is a looked-up trace safe to enter? (review: per-segment source validation.)
+// head_live_phys is the head's freshly resolved physical. The steps mirror the block dispatcher's phys
+// check (jit_run ~line 832) + revalidate_flushed's hash:
+//   1. head remap / ASN-recycle: the head's live physical no longer matches what we built from -> stale.
+//   2. epoch fresh (nothing flushed/ITB-invalidated since build) -> enter directly.
+//   3. epoch changed -> re-hash every fused segment. Unchanged bytes => the epoch bumped for an unrelated
+//      reason (e.g. an IMB on another page): keep the trace + re-stamp. Changed bytes (SMC/remap): stale.
+// Residual (wont do until multi-page traces are real): an INTERIOR page remapped to DIFFERENT physical
+// with IDENTICAL bytes is not caught by the hash, we need per-segment phys re-resolution. 
+bool CJitEngine::trace_ok(TraceFragment* t, uint64_t head_live_phys, const uint8_t* dram)
+{
+  if (t->n_segs == 0 || t->segs[0].phys_pc != head_live_phys)
+    return false;                                     // head remap / ASN recycle
+  if (t->vgen == m_itb_gen + m_flush_gen)
+    return true;                                      // epoch fresh: nothing changed since build
+  for (uint32_t i = 0; i < t->n_segs; ++i) {
+    const SourceSeg& s = t->segs[i];
+    if (s.src_sum != src_hash(dram + s.phys_pc, s.n_instr))
+      return false;                                   // a segment's source bytes changed -> stale
+  }
+  t->vgen = m_itb_gen + m_flush_gen;                  // all segments re-validated: re-stamp the epoch
+  t->flush_gen = m_flush_gen;
+  return true;
 }
 
 // Free ALL compiled code (delete+new of the runtime; reset()-and-reuse corrupted the JitAllocator

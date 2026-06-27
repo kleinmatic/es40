@@ -41,6 +41,14 @@ public:
   static constexpr int      kCacheEntries = 1 << kCacheBits;
   static constexpr uint64_t kIndexMask = (uint64_t) kCacheEntries - 1;
 
+  // Trace tier (M0+): a small SECOND cache, beside m_blocks, for hot superblock heads. Only the
+  // hottest loop heads are promoted, so it stays small. Same direct-mapped, virtual+ASN-keyed shape.
+  static constexpr int      kTraceBits = 12;            // 4K trace heads
+  static constexpr uint64_t kTraceEntries = 1 << kTraceBits;
+  static constexpr uint64_t kTraceIndexMask = kTraceEntries - 1;
+  static constexpr uint32_t kMaxTraceSegs = 16;         // fused blocks per trace (multi-block coherence)
+  static constexpr uint32_t kMaxTraceExits = 16;        // guards / side-exits per trace
+
   // Reclaim executable memory once compiled code passes this many bytes, rather
   // than tearing down the asmjit runtime on every flush (see flush()).
   static constexpr uint64_t kReclaimBytes = 32 * 1024 * 1024;
@@ -78,6 +86,40 @@ public:
 #endif
   };
 
+  // Per fused block: the source-coherence descriptor (review: multi-block traces need this). A trace
+  // spans multiple blocks/pages, so a single head tag + epoch is not enough -- trace_ok() re-hashes
+  // these on an epoch change, mirroring revalidate_flushed, and also stores what to re-form.
+  struct SourceSeg {
+    uint64_t guest_pc;    // segment start virtual PC
+    uint64_t phys_pc;     // segment start physical PC (source bytes)
+    uint32_t n_instr;     // instructions in the segment (hash length)
+    bool     asm_global;  // global (ASM) segment
+    uint32_t asn;         // ASN (ignored when asm_global)
+    uint64_t src_sum;     // hash of the segment's source words at build
+  };
+
+  // M4+: which guest regs are held in host registers (not yet committed to state.r[]) at a side-exit.
+  // Empty through M3 (no register cache across guards), so the side-exit needs no spill until M4.
+  struct Snapshot { uint64_t dirty_gpr; uint64_t dirty_fpr; };
+
+  struct TraceExit {
+    uint64_t guest_pc;    // resume PC handed to the block dispatcher (compile-time constant)
+    Snapshot snap;        // M4+ (zero until then)
+  };
+
+  struct TraceFragment {
+    uint64_t  head_tag;       // entry virtual PC (key)
+    uint32_t  asn;            // key (ignored when asm_global)
+    bool      asm_global;
+    bool      valid;
+    JitFn     code;           // single entry; null = empty slot
+    uint64_t  vgen;           // build epoch = m_itb_gen + m_flush_gen (coherence; see trace_ok)
+    uint64_t  flush_gen;      // IC-flush epoch at build
+    uint32_t  n_blocks, n_instr;
+    SourceSeg segs[kMaxTraceSegs];   uint32_t n_segs;
+    TraceExit exits[kMaxTraceExits]; uint32_t n_exits;
+  };
+
   // Byte offsets (from the CAlphaCPU*) of the fields the inline load fast path reads,
   // so compiled code can touch them via [rsi + offset]. Filled once by set_offsets().
   struct JitOffsets {
@@ -97,6 +139,7 @@ public:
   ~CJitEngine();
 
   static inline uint64_t index_of(uint64_t virt_pc) { return (virt_pc >> 2) & kIndexMask; }
+  static inline uint64_t trace_index_of(uint64_t virt_pc) { return (virt_pc >> 2) & kTraceIndexMask; }
 
   // Virtual+ASN keyed: no translation on the dispatch hot path. A global (ASM)
   // block matches any ASN, mirroring the icache's hit rule. flush_gen-stale blocks
@@ -106,6 +149,23 @@ public:
     JitBlock& b = m_blocks[index_of(virt_pc)];
     return (b.valid && b.flush_gen == m_flush_gen && b.tag == virt_pc && (b.asm_global || b.asn == asn)) ? &b : nullptr;
   }
+
+  // Trace tier (M0+): the global kill-switch + the trace-cache lookup. traces_enabled() is false until
+  // M1 enables a region, so the dispatcher hook is inert (one predictable-not-taken branch) and the
+  // engine is bit-identical to the block-only build. Unlike the block lookup, this does NOT gate on
+  // flush_gen -- trace_ok() owns all staleness (so an unrelated flush re-validates instead of dropping).
+  inline bool traces_enabled() const { return m_traces_enabled; }
+  inline void set_traces_enabled(bool e) { m_traces_enabled = e; }
+
+  inline TraceFragment* trace_lookup(uint64_t virt_pc, uint32_t asn)
+  {
+    TraceFragment& t = m_traces[trace_index_of(virt_pc)];
+    return (t.valid && t.head_tag == virt_pc && (t.asm_global || t.asn == asn)) ? &t : nullptr;
+  }
+
+  // Source-coherence check (review: per-segment, from M0). head_live_phys is the head's freshly
+  // resolved physical; on a remap/flush since build, fall back to blocks + re-form. See the .cpp.
+  bool trace_ok(TraceFragment* t, uint64_t head_live_phys, const uint8_t* dram);
 
   // Lazy-flush survivor: hash-revalidate the slot in place (no interpreted pass, no re-record).
   JitBlock* revalidate_flushed(uint64_t virt_pc, uint32_t asn, uint64_t phys_pc, const uint8_t* dram);
@@ -162,6 +222,8 @@ public:
 
 private:
   JitBlock m_blocks[kCacheEntries];
+  TraceFragment m_traces[kTraceEntries];   // M0+: the trace tier's cache (inert until M1)
+  bool     m_traces_enabled = false;       // global kill-switch; default OFF -> bit-identical
   int      m_cpu_id;
   uint64_t m_recorded;
   uint64_t m_itb_gen = 0; // current ITB generation (bumped on every I-stream TB invalidate)

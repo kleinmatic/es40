@@ -449,38 +449,38 @@ void CAlphaCPU::init()
 	state.iProcNum = cSystem->RegisterCPU(this);
 
 #ifdef ES40_JIT
-	if (!m_jit) m_jit = new CJitEngine((int) state.iProcNum);
+	if (!m_jit) m_jit = new CJitEngine((int)state.iProcNum);
 	{
 		// Tell the JIT the byte offsets (from `this`) of the fields its inline load
 		// fast path reads, so compiled code can address them via [cpu + offset].
 		CJitEngine::JitOffsets o;
 		// Slot [0][0] of the read cache; the inline load adds dpc_index(va)*dpc_stride to reach
 		// the indexed slot, so these are the base (slot 0) field offsets.
-		o.dpc_valid     = (uint32_t) ((char*) &data_page_cache[0][0].valid     - (char*) this);
-		o.dpc_virt_page = (uint32_t) ((char*) &data_page_cache[0][0].virt_page - (char*) this);
-		o.dpc_phys_base = (uint32_t) ((char*) &data_page_cache[0][0].phys_base - (char*) this);
-		o.dpc_host_base = (uint32_t) ((char*) &data_page_cache[0][0].host_base - (char*) this);
-		o.dpc_cm        = (uint32_t) ((char*) &data_page_cache[0][0].cm        - (char*) this);
-		o.dpc_asn       = (uint32_t) ((char*) &data_page_cache[0][0].asn       - (char*) this);
-		o.dpc_stride    = (uint32_t) sizeof(data_page_cache[0][0]);
-		o.dpc_mask      = (uint32_t) kDpcMask;
-		o.dpc_write_row = (uint32_t) ((char*) &data_page_cache[1][0] - (char*) &data_page_cache[0][0]);
-		o.state_cm      = (uint32_t) ((char*) &state.cm   - (char*) this);
-		o.state_asn0    = (uint32_t) ((char*) &state.asn0 - (char*) this);
-		o.dram_ptr      = (uint32_t) ((char*) &dram_ptr   - (char*) this);
-		o.dram_size     = (uint32_t) ((char*) &dram_size  - (char*) this);
-		o.state_pc      = (uint32_t) ((char*) &state.pc   - (char*) this);
-		o.jit_budget    = (uint32_t) ((char*) &m_jit_budget      - (char*) this);
-		o.check_int     = (uint32_t) ((char*) &state.check_int    - (char*) this);
-		o.check_timers  = (uint32_t) ((char*) &state.check_timers - (char*) this);
-		o.link_from     = (uint32_t) ((char*) &m_link_from        - (char*) this);
-		o.fpen          = (uint32_t) ((char*) &state.fpen     - (char*) this);
-		o.exc_sum       = (uint32_t) ((char*) &state.exc_sum  - (char*) this);
-		o.f_base        = (uint32_t) ((char*) &state.f[0]     - (char*) this);
-		o.fpcr          = (uint32_t) ((char*) &state.fpcr    - (char*) this);
-		o.exc_addr      = (uint32_t) ((char*) &state.exc_addr - (char*) this);
-		o.pal_base      = (uint32_t) ((char*) &state.pal_base - (char*) this);
-		o.sde           = (uint32_t) ((char*) &state.sde      - (char*) this);
+		o.dpc_valid = (uint32_t)((char*)&data_page_cache[0][0].valid - (char*)this);
+		o.dpc_virt_page = (uint32_t)((char*)&data_page_cache[0][0].virt_page - (char*)this);
+		o.dpc_phys_base = (uint32_t)((char*)&data_page_cache[0][0].phys_base - (char*)this);
+		o.dpc_host_base = (uint32_t)((char*)&data_page_cache[0][0].host_base - (char*)this);
+		o.dpc_cm = (uint32_t)((char*)&data_page_cache[0][0].cm - (char*)this);
+		o.dpc_asn = (uint32_t)((char*)&data_page_cache[0][0].asn - (char*)this);
+		o.dpc_stride = (uint32_t)sizeof(data_page_cache[0][0]);
+		o.dpc_mask = (uint32_t)kDpcMask;
+		o.dpc_write_row = (uint32_t)((char*)&data_page_cache[1][0] - (char*)&data_page_cache[0][0]);
+		o.state_cm = (uint32_t)((char*)&state.cm - (char*)this);
+		o.state_asn0 = (uint32_t)((char*)&state.asn0 - (char*)this);
+		o.dram_ptr = (uint32_t)((char*)&dram_ptr - (char*)this);
+		o.dram_size = (uint32_t)((char*)&dram_size - (char*)this);
+		o.state_pc = (uint32_t)((char*)&state.pc - (char*)this);
+		o.jit_budget = (uint32_t)((char*)&m_jit_budget - (char*)this);
+		o.check_int = (uint32_t)((char*)&state.check_int - (char*)this);
+		o.check_timers = (uint32_t)((char*)&state.check_timers - (char*)this);
+		o.link_from = (uint32_t)((char*)&m_link_from - (char*)this);
+		o.fpen = (uint32_t)((char*)&state.fpen - (char*)this);
+		o.exc_sum = (uint32_t)((char*)&state.exc_sum - (char*)this);
+		o.f_base = (uint32_t)((char*)&state.f[0] - (char*)this);
+		o.fpcr = (uint32_t)((char*)&state.fpcr - (char*)this);
+		o.exc_addr = (uint32_t)((char*)&state.exc_addr - (char*)this);
+		o.pal_base = (uint32_t)((char*)&state.pal_base - (char*)this);
+		o.sde = (uint32_t)((char*)&state.sde - (char*)this);
 		m_jit->set_offsets(o);
 	}
 #endif
@@ -766,7 +766,7 @@ void CAlphaCPU::jit_run(int budget)
 	// it tracks the configured CPU frequency no matter how fast/bursty the JIT runs 
 	// The <1s guard skips odd deltas (first call / reset / pause), like the timer catch-up below.
 	if (state.cc_ena && cc_delta < std::chrono::seconds(1))
-		state.cc += (u64) std::chrono::duration_cast<std::chrono::nanoseconds>(cc_delta).count() * cpu_hz / 1000000000ULL;
+		state.cc += (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(cc_delta).count() * cpu_hz / 1000000000ULL;
 
 	// Drive the Cchip interval timer once per dispatch batch (CPU0 only), not
 	// once per instruction the way the in-execute() poll did.
@@ -792,40 +792,54 @@ void CAlphaCPU::jit_run(int budget)
 	while (budget > 0)
 	{
 		const u64 start_virt = state.pc;
-		const u32 start_asn  = (u32) state.asn;
+		const u32 start_asn = (u32)state.asn;
 
 		// Resolve the block's physical start side-effect-free (FAKE = no fault, no TB fill) so
 		// execute() stays the sole I-stream fetcher; covers superpage/KSEG (no TB entry). phys
 		// validates a compiled block vs the live translation -- virtual+ASN keying misses remaps.
 		u64  start_phys = 0;
-		bool start_asm  = false;
-		bool have_phys  = true;
+		bool start_asm = false;
+		bool have_phys = true;
 		if (start_virt & 1)            // PALmode: physically addressed, always ASM
 		{
 			start_phys = start_virt & ~U64(1);
-			start_asm  = true;
+			start_asm = true;
 		}
 		else
 		{
 			// Fast path: icache hit-probe reads phys straight from the line, read-only (no fill,
 			// no fault) -- get_icache's hit geometry minus the side effects. Covers warm code.
-			const int ici = (int) (((start_virt & ~U64(3)) >> 11) & (ICACHE_ENTRIES - 1));
+			const int ici = (int)(((start_virt & ~U64(3)) >> 11) & (ICACHE_ENTRIES - 1));
 			if (icache_enabled && state.icache[ici].valid
-			    && (state.icache[ici].asn == state.asn || state.icache[ici].asm_bit)
-			    && state.icache[ici].address == (start_virt & ICACHE_MATCH_MASK))
+				&& (state.icache[ici].asn == state.asn || state.icache[ici].asm_bit)
+				&& state.icache[ici].address == (start_virt & ICACHE_MATCH_MASK))
 			{
 				start_phys = state.icache[ici].p_address + (start_virt & ICACHE_BYTE_MASK);
-				start_asm  = state.icache[ici].asm_bit;
+				start_asm = state.icache[ici].asm_bit;
 			}
 			// Slow path: superpage/KSEG + cold pages (FAKE = no side effect; miss -> interpret).
 			else if (virt2phys(start_virt, &start_phys, ACCESS_EXEC | FAKE, &start_asm, 0) != 0)
 				have_phys = false;
 		}
 
+		// Trace tier (scaffolding): gated lookup BEFORE the block cache. m_traces_enabled is
+		// false until run_trace is live, so this whole path is skipped, bit-identical to the 
+		// block-only.
+		// Next step fills in trace execution (run the fragment, which side-exits back here with 
+		// state.pc set, then `continue`); the block cache stays the universal fallback.
+		if (have_phys && m_jit->traces_enabled())
+		{
+			CJitEngine::TraceFragment* t = m_jit->trace_lookup(start_virt, start_asn);
+			if (t && m_jit->trace_ok(t, start_phys, (const uint8_t*)dram_ptr))
+			{
+				// run_trace(t); continue;   (no traces are formed yet -> unreachable)
+			}
+		}
+
 		// Hot path: virtual+ASN lookup, phys-validated (skipped on a translation miss).
 		CJitEngine::JitBlock* b = have_phys ? m_jit->lookup(start_virt, start_asn) : nullptr;
 		if (have_phys && !b)   // lazy-flushed survivor? hash-revalidate in place (no interpreted pass)
-			b = m_jit->revalidate_flushed(start_virt, start_asn, start_phys, (const uint8_t*) dram_ptr);
+			b = m_jit->revalidate_flushed(start_virt, start_asn, start_phys, (const uint8_t*)dram_ptr);
 
 		// A valid block whose phys no longer matches = a page remap the virtual key can't see.
 		// The cold path below re-records it; log it -- it's the smoking gun for stale-chain bugs.
@@ -834,14 +848,14 @@ void CAlphaCPU::jit_run(int budget)
 			static int n_stale = 0;
 			if (n_stale++ < 20)
 				printf("[JIT][CPU%d] DISPATCH STALE: pc=%016llx block_phys=%016llx live_phys=%016llx\n",
-				       (int) state.iProcNum, (unsigned long long) start_virt,
-				       (unsigned long long) b->phys, (unsigned long long) start_phys);
+					(int)state.iProcNum, (unsigned long long) start_virt,
+					(unsigned long long) b->phys, (unsigned long long) start_phys);
 		}
 
 		// Run the compiled safe prefix natively when available -- but not while an
 		// interrupt or delayed timer is pending. Compiled blocks don't run the
 		// per-instruction polls, so run the interpreter.
-		if (b && b->code && b->phys == start_phys && (int) b->prefix_len <= budget
+		if (b && b->code && b->phys == start_phys && (int)b->prefix_len <= budget
 			&& !state.check_int && !state.check_timers
 			&& (!(b->tag & 1) || state.sde))   // PALmode block: its shadow-register remap assumes SDE
 		{
@@ -854,16 +868,16 @@ void CAlphaCPU::jit_run(int budget)
 			memcpy(snap, state.r, sizeof(snap));
 			u64 f_pre[64];  // FP file before the interp pass -- restored before the compiled pass below
 			memcpy(f_pre, state.f, sizeof(f_pre));   // so the compiled FP ops read the same f[] the interp did
-				// I_CTL/CM/SIRR + PCTX fields (HW_MFPR 0x40-7f reads astrr/aster/fpen/ppcen) are read-modify-written; a HW_MFPR reads, a later HW_MTPR writes,
-				// so the interp pass writes before the compiled pass's HW_MFPR reads. Snapshot the read-back
-				// fields here and restore them before b->code() below -- like snap/f_pre do for GPRs/FP.
-				const bool ictl_sde_pre = state.sde, ictl_hwe_pre = state.hwe;
-				const int  ictl_spe_pre = state.i_ctl_spe, ictl_vam_pre = state.i_ctl_va_mode;
-				const u64  ictl_vptb_pre = state.i_ctl_vptb, ictl_other_pre = state.i_ctl_other;
-				const int  cm_pre = state.cm, sir_pre = state.sir;   // CM/SIRR read-back (HW_MFPR CM/SIRR)
-				const int  aster_pre = state.aster, astrr_pre = state.astrr;   // AST/FPEN/PPCEN read-back via the
-				const int  fpen_pre = state.fpen, ppcen_pre = state.ppcen;     // PCTX group (HW_MFPR 0x40-7f)
-			const u32* vw = (const u32*) ((const u8*) dram_ptr + b->phys);
+			// I_CTL/CM/SIRR + PCTX fields (HW_MFPR 0x40-7f reads astrr/aster/fpen/ppcen) are read-modify-written; a HW_MFPR reads, a later HW_MTPR writes,
+			// so the interp pass writes before the compiled pass's HW_MFPR reads. Snapshot the read-back
+			// fields here and restore them before b->code() below -- like snap/f_pre do for GPRs/FP.
+			const bool ictl_sde_pre = state.sde, ictl_hwe_pre = state.hwe;
+			const int  ictl_spe_pre = state.i_ctl_spe, ictl_vam_pre = state.i_ctl_va_mode;
+			const u64  ictl_vptb_pre = state.i_ctl_vptb, ictl_other_pre = state.i_ctl_other;
+			const int  cm_pre = state.cm, sir_pre = state.sir;   // CM/SIRR read-back (HW_MFPR CM/SIRR)
+			const int  aster_pre = state.aster, astrr_pre = state.astrr;   // AST/FPEN/PPCEN read-back via the
+			const int  fpen_pre = state.fpen, ppcen_pre = state.ppcen;     // PCTX group (HW_MFPR 0x40-7f)
+			const u32* vw = (const u32*)((const u8*)dram_ptr + b->phys);
 			u32 vn = 0;   // loads recorded for replay
 			u32 sn = 0;   // stores recorded for the compiled-pass compare
 			u64 vpc = start_virt;
@@ -879,34 +893,34 @@ void CAlphaCPU::jit_run(int budget)
 				// this same vlog, but its address is physical (untranslated) with a 12-bit disp.
 				// Func 5 (quad VPTE) too -- its logged va is virtual, jit_read_vpte's replay key.
 				const bool is_hwld = (opc == 0x1b) &&
-				                     ((((ins >> 12) & 0xf) <= 1) || (((ins >> 12) & 0xf) == 5) || (((ins >> 12) & 0xf) == 10));
+					((((ins >> 12) & 0xf) <= 1) || (((ins >> 12) & 0xf) == 5) || (((ins >> 12) & 0xf) == 10));
 				// RPCC/RC/RS (MISC 0x18) and ISUM (HW_MFPR 0x19 fn 0x0d) read CPU state the verify can't
 				// re-derive; the compiled forms pull their value from this same load log (jit_misc /
 				// jit_hw_mfpr replay it), so log them like loads.
-				const u32  miscfn    = (ins & 0xFFFF);
+				const u32  miscfn = (ins & 0xFFFF);
 				// Compiled misc reads: RC/RS (0xE000/0xF000) for all Ra incl. 31 (the flag-only side-effect
 				// forms compile too); RPCC (0xC000) only when it has a GPR dest (Ra!=31).
 				const bool is_miscrd = (opc == 0x18) && (miscfn == 0xE000 || miscfn == 0xF000 || (miscfn == 0xC000 && lra != 31));
-				const bool is_isum   = (opc == 0x19) && (((ins >> 8) & 0xff) == 0x0d);   // ISUM: async interrupt-summary
-				const bool is_fpld   = (opc == 0x22 || opc == 0x23 || opc == 0x20 || opc == 0x21);   // LDS/LDT/LDF/LDG: dest is f[lra]
+				const bool is_isum = (opc == 0x19) && (((ins >> 8) & 0xff) == 0x0d);   // ISUM: async interrupt-summary
+				const bool is_fpld = (opc == 0x22 || opc == 0x23 || opc == 0x20 || opc == 0x21);   // LDS/LDT/LDF/LDG: dest is f[lra]
 				// Loads/ISUM/LDS/LDT only log when they have a dest (lra!=31); the misc reads are logged
 				// regardless -- a compiled RC/RS Ra==31 still consumes a replay slot, so keep the index in sync.
 				const bool isld = ((opc == 0x28 || opc == 0x29 || opc == 0x0a || opc == 0x0c
-				                    || opc == 0x2a || opc == 0x2b || opc == 0x0b || is_hwld || is_isum || is_fpld) && lra != 31)
-				                  || is_miscrd;  // +LDBU/LDWU +LDx_L +LDQ_U +RPCC/RC/RS +ISUM +LDS/LDT
+					|| opc == 0x2a || opc == 0x2b || opc == 0x0b || is_hwld || is_isum || is_fpld) && lra != 31)
+					|| is_miscrd;  // +LDBU/LDWU +LDx_L +LDQ_U +RPCC/RC/RS +ISUM +LDS/LDT
 				u64 eva = 0;
 				if (isld && !is_miscrd && !is_isum)   // misc/ISUM reads have no effective address -- only a logged value
 				{
 					const int lrb = (ins >> 16) & 0x1F;
-					const int ldisp = is_hwld ? (int) ((int32_t) (ins << 20) >> 20)   // HW_LD: 12-bit
-					                          : (int) (int16_t) (ins & 0xFFFF);        // LDx:   16-bit
-					eva = (lrb == 31 ? (u64) 0 : state.r[RREG(lrb)]) + (u64) ldisp;
+					const int ldisp = is_hwld ? (int)((int32_t)(ins << 20) >> 20)   // HW_LD: 12-bit
+						: (int)(int16_t)(ins & 0xFFFF);        // LDx:   16-bit
+					eva = (lrb == 31 ? (u64)0 : state.r[RREG(lrb)]) + (u64)ldisp;
 					if (opc == 0x0b) eva &= ~U64(7);   // LDQ_U: address forced to 8-byte alignment
 				}
 				// Stores touch memory, not GPRs, so record (addr,value) for the compiled-pass
 				// compare. Ra (lra) is the value source; Rb is the base. HW_ST physical (0x1f func
 				// 0/1) stores too, with a physical (untranslated) address and a 12-bit disp.
-				const bool is_sc   = (opc == 0x2e || opc == 0x2f);   // STL_C/STQ_C: store-conditional (success in Ra)
+				const bool is_sc = (opc == 0x2e || opc == 0x2f);   // STL_C/STQ_C: store-conditional (success in Ra)
 				const bool is_hwst = (opc == 0x1f) && (((ins >> 12) & 0xf) <= 1);
 				const bool is_fpst = (opc == 0x26 || opc == 0x27 || opc == 0x24 || opc == 0x25);   // STS/STT/STF/STG: value source is f[lra]
 				const bool isst = (opc == 0x2c || opc == 0x2d || opc == 0x0d || opc == 0x0e || opc == 0x0f || is_sc || is_hwst || is_fpst);  // +STx_C +STQ_U +STS/STT
@@ -914,13 +928,13 @@ void CAlphaCPU::jit_run(int budget)
 				if (isst)
 				{
 					const int srb = (ins >> 16) & 0x1F;
-					const int sdisp = is_hwst ? (int) ((int32_t) (ins << 20) >> 20)   // HW_ST: 12-bit
-					                          : (int) (int16_t) (ins & 0xFFFF);        // STx:   16-bit
-					sva  = (srb == 31 ? (u64) 0 : state.r[RREG(srb)]) + (u64) sdisp;
+					const int sdisp = is_hwst ? (int)((int32_t)(ins << 20) >> 20)   // HW_ST: 12-bit
+						: (int)(int16_t)(ins & 0xFFFF);        // STx:   16-bit
+					sva = (srb == 31 ? (u64)0 : state.r[RREG(srb)]) + (u64)sdisp;
 					if (opc == 0x0f) sva &= ~U64(7);   // STQ_U: address forced to 8-byte alignment
-					if (is_fpst) sval = (opc == 0x27) ? state.f[lra] : (opc == 0x26) ? (u64) ieee_sts(state.f[lra])
-					                  : (opc == 0x24) ? (u64) vax_stf(state.f[lra]) : vax_stg(state.f[lra]);   // STT/STS/STF/STG
-					else         sval = (lra == 31 ? (u64) 0 : state.r[RREG(lra)]);
+					if (is_fpst) sval = (opc == 0x27) ? state.f[lra] : (opc == 0x26) ? (u64)ieee_sts(state.f[lra])
+						: (opc == 0x24) ? (u64)vax_stf(state.f[lra]) : vax_stg(state.f[lra]);   // STT/STS/STF/STG
+					else         sval = (lra == 31 ? (u64)0 : state.r[RREG(lra)]);
 				}
 				// Computed jump (JMP/JSR/RET): target = Rb & ~3, taken before execute() (the
 				// jump's target uses the old Rb, even if Ra==Rb gets the return address after).
@@ -929,7 +943,7 @@ void CAlphaCPU::jit_run(int budget)
 				{
 					const int jrb = (ins >> 16) & 0x1F;
 					const u64 jmask = (opc == 0x1e) ? ~U64(2) : ~U64(3);
-					jtgt = (jrb == 31 ? (u64) 0 : state.r[RREG(jrb)]) & jmask;
+					jtgt = (jrb == 31 ? (u64)0 : state.r[RREG(jrb)]) & jmask;
 					if (opc == 0x1a)
 						jtgt |= start_virt & 3;   // DO_JMP: mode bits come from the current pc
 				}
@@ -947,10 +961,10 @@ void CAlphaCPU::jit_run(int budget)
 					// skip the compare instead of flagging a false mismatch.
 					bool ok_branch = false;
 					if (k == b->prefix_len - 1 &&
-					    (opc == 0x30 || opc == 0x34 || (opc >= 0x38 && opc <= 0x3f)))
+						(opc == 0x30 || opc == 0x34 || (opc >= 0x38 && opc <= 0x3f)))
 					{
-						const int64_t bdisp = (int64_t) ((uint64_t) (ins & 0x1FFFFF) << 43) >> 43;
-						const u64 tgt = vpc + (u64) (bdisp * 4);   // vpc == branch_pc + 4 (fall-through)
+						const int64_t bdisp = (int64_t)((uint64_t)(ins & 0x1FFFFF) << 43) >> 43;
+						const u64 tgt = vpc + (u64)(bdisp * 4);   // vpc == branch_pc + 4 (fall-through)
 						ok_branch = (state.pc == tgt);
 					}
 					else if (k == b->prefix_len - 1 && (opc == 0x1a || opc == 0x1e))
@@ -962,7 +976,7 @@ void CAlphaCPU::jit_run(int budget)
 						// CALL_PAL vectored to its PALcode entry (pal_base | offset); the kernel-mode
 						// path never traps, but accept the OPCDEC vector too.
 						const u32 func = ins & 0x1FFFFFFF;
-						const u64 voff = (u64) 0x2000 | ((u64) (func & 0x80) << 5) | ((u64) (func & 0x3f) << 6) | U64(1);
+						const u64 voff = (u64)0x2000 | ((u64)(func & 0x80) << 5) | ((u64)(func & 0x3f) << 6) | U64(1);
 						ok_branch = (state.pc == (state.pal_base | voff)) || (state.pc == (state.pal_base | OPCDEC | U64(1)));
 					}
 					if (!ok_branch)
@@ -978,8 +992,8 @@ void CAlphaCPU::jit_run(int budget)
 				if (isst && sn < 64)
 				{
 					m_jit_slog_addr[sn] = sva;
-					m_jit_slog_val[sn]  = sval;
-					m_jit_slog_success[sn] = is_sc ? state.r[RREG(lra)] : (u64) 1;   // STx_C result (post-execute); ordinary store = 1
+					m_jit_slog_val[sn] = sval;
+					m_jit_slog_success[sn] = is_sc ? state.r[RREG(lra)] : (u64)1;   // STx_C result (post-execute); ordinary store = 1
 					sn++;
 				}
 			}
@@ -992,33 +1006,33 @@ void CAlphaCPU::jit_run(int budget)
 					// (ictl_*_pre, above). Keep this list in sync with jit_hw_mtpr.
 				auto cap_iprs = [&](u64* d) {
 					d[0] = state.last_tb_virt; d[1] = last_dtb_virt[0]; d[2] = last_dtb_virt[1];
-					d[3] = state.pctr_ctl; d[4] = state.dc_ctl; d[5] = (u64) state.cc_offset; d[6] = (u64) (u32) state.alt_cm;
+					d[3] = state.pctr_ctl; d[4] = state.dc_ctl; d[5] = (u64)state.cc_offset; d[6] = (u64)(u32)state.alt_cm;
 					// IER enables; check_int not snapshotted (rolling it back could suppress a poll)
-					d[7] = (u64) (u32) state.asten; d[8] = (u64) (u32) state.sien; d[9] = (u64) (u32) state.pcen;
-					d[10] = (u64) (u32) state.cren; d[11] = (u64) (u32) state.slen; d[12] = (u64) (u32) state.eien;
+					d[7] = (u64)(u32)state.asten; d[8] = (u64)(u32)state.sien; d[9] = (u64)(u32)state.pcen;
+					d[10] = (u64)(u32)state.cren; d[11] = (u64)(u32)state.slen; d[12] = (u64)(u32)state.eien;
 					d[13] = state.exc_sum;   // FPSTART clears it (compiled ITOFx/FTOIx/FLTL)
 					d[14] = state.fpcr;      // MT_FPCR (compiled FLTL) writes it
-					d[15] = (u64) state.sde; d[16] = (u64) state.hwe;            // I_CTL (compiled as terminator)
-					d[17] = (u64) (u32) state.i_ctl_spe; d[18] = (u64) (u32) state.i_ctl_va_mode;
+					d[15] = (u64)state.sde; d[16] = (u64)state.hwe;            // I_CTL (compiled as terminator)
+					d[17] = (u64)(u32)state.i_ctl_spe; d[18] = (u64)(u32)state.i_ctl_va_mode;
 					d[19] = state.i_ctl_vptb; d[20] = state.i_ctl_other;
-					d[21] = (u64) (u32) state.cm;    d[22] = (u64) (u32) state.sir;     // CM, SIRR
-					d[23] = (u64) (u32) state.aster; d[24] = (u64) (u32) state.astrr;   // 0x40-group ASTER/ASTRR
-					d[25] = (u64) (u32) state.fpen;  d[26] = (u64) (u32) state.ppcen;   // 0x40-group FPEN/PPCEN
-				};
+					d[21] = (u64)(u32)state.cm;    d[22] = (u64)(u32)state.sir;     // CM, SIRR
+					d[23] = (u64)(u32)state.aster; d[24] = (u64)(u32)state.astrr;   // 0x40-group ASTER/ASTRR
+					d[25] = (u64)(u32)state.fpen;  d[26] = (u64)(u32)state.ppcen;   // 0x40-group FPEN/PPCEN
+					};
 				auto put_iprs = [&](const u64* s) {
 					state.last_tb_virt = s[0]; last_dtb_virt[0] = s[1]; last_dtb_virt[1] = s[2];
-					state.pctr_ctl = s[3]; state.dc_ctl = s[4]; state.cc_offset = (u32) s[5]; state.alt_cm = (int) s[6];
-					state.asten = (int) s[7]; state.sien = (int) s[8]; state.pcen = (int) s[9];
-					state.cren = (int) s[10]; state.slen = (int) s[11]; state.eien = (int) s[12];
+					state.pctr_ctl = s[3]; state.dc_ctl = s[4]; state.cc_offset = (u32)s[5]; state.alt_cm = (int)s[6];
+					state.asten = (int)s[7]; state.sien = (int)s[8]; state.pcen = (int)s[9];
+					state.cren = (int)s[10]; state.slen = (int)s[11]; state.eien = (int)s[12];
 					state.exc_sum = s[13];
 					state.fpcr = s[14];
-					state.sde = (bool) s[15]; state.hwe = (bool) s[16];
-					state.i_ctl_spe = (int) s[17]; state.i_ctl_va_mode = (int) s[18];
+					state.sde = (bool)s[15]; state.hwe = (bool)s[16];
+					state.i_ctl_spe = (int)s[17]; state.i_ctl_va_mode = (int)s[18];
 					state.i_ctl_vptb = s[19]; state.i_ctl_other = s[20];
-					state.cm = (int) s[21]; state.sir = (int) s[22];
-					state.aster = (int) s[23]; state.astrr = (int) s[24];
-					state.fpen = (int) s[25]; state.ppcen = (int) s[26];
-				};
+					state.cm = (int)s[21]; state.sir = (int)s[22];
+					state.aster = (int)s[23]; state.astrr = (int)s[24];
+					state.fpen = (int)s[25]; state.ppcen = (int)s[26];
+					};
 				u64 ipr_interp[27];
 				cap_iprs(ipr_interp);
 				// FP file: compiled ITOFx writes state.f live (like the IPR writes); snapshot the
@@ -1028,12 +1042,12 @@ void CAlphaCPU::jit_run(int budget)
 				u64 jr[64];   // 64: a compiled PALmode block may touch the shadow bank
 				memcpy(jr, snap, sizeof(jr));
 				memcpy(state.f, f_pre, sizeof(f_pre));   // restore the FP file like the GPRs: the compiled pass reads pre-interp f
-					state.sde = ictl_sde_pre; state.hwe = ictl_hwe_pre;   // restore I_CTL too: a compiled HW_MFPR must read the pre-interp value
-					state.i_ctl_spe = ictl_spe_pre; state.i_ctl_va_mode = ictl_vam_pre;
-					state.i_ctl_vptb = ictl_vptb_pre; state.i_ctl_other = ictl_other_pre;
-					state.cm = cm_pre; state.sir = sir_pre;                      // ...and CM/SIRR
-					state.aster = aster_pre; state.astrr = astrr_pre;            // ...and the PCTX read-backs (a
-					state.fpen = fpen_pre; state.ppcen = ppcen_pre;              // HW_MFPR PCTX reads these live)
+				state.sde = ictl_sde_pre; state.hwe = ictl_hwe_pre;   // restore I_CTL too: a compiled HW_MFPR must read the pre-interp value
+				state.i_ctl_spe = ictl_spe_pre; state.i_ctl_va_mode = ictl_vam_pre;
+				state.i_ctl_vptb = ictl_vptb_pre; state.i_ctl_other = ictl_other_pre;
+				state.cm = cm_pre; state.sir = sir_pre;                      // ...and CM/SIRR
+				state.aster = aster_pre; state.astrr = astrr_pre;            // ...and the PCTX read-backs (a
+				state.fpen = fpen_pre; state.ppcen = ppcen_pre;              // HW_MFPR PCTX reads these live)
 				const u64 interp_pc = state.pc;   // interpreter is authoritative for the PC
 				m_jit_vreplay = true;
 				m_jit_vlog_i = 0;
@@ -1046,31 +1060,31 @@ void CAlphaCPU::jit_run(int budget)
 						// Dump the JIT's source (DRAM at b->phys, vw[]) vs the icache (what the
 						// interpreter actually fetches), word by word. If the middle words differ
 						// the icache holds a stale/different version the JIT never compiled.
-						const int icl = (int) ((start_virt >> 11) & (ICACHE_ENTRIES - 1));
-						const u32 wb  = (u32) ((start_virt >> 2) & ICACHE_INDEX_MASK);
+						const int icl = (int)((start_virt >> 11) & (ICACHE_ENTRIES - 1));
+						const u32 wb = (u32)((start_virt >> 2) & ICACHE_INDEX_MASK);
 						printf("[JIT][VERIFY] PC MISMATCH at %016llx: interp=%016llx jit=%016llx plen=%u\n",
-						       (unsigned long long) start_virt, (unsigned long long) interp_pc,
-						       (unsigned long long) state.pc, b->prefix_len);
+							(unsigned long long) start_virt, (unsigned long long) interp_pc,
+							(unsigned long long) state.pc, b->prefix_len);
 						printf("   dram:");
 						for (u32 w = 0; w < b->prefix_len && w < 16; ++w) printf(" %08x", vw[w]);
 						printf("\n   icch:");
 						for (u32 w = 0; w < b->prefix_len && w < 16; ++w)
 							printf(" %08x", endian_32(state.icache[icl].data[(wb + w) & ICACHE_INDEX_MASK]));
 						printf("\n   r1 i=%016llx j=%016llx  r2 i=%016llx j=%016llx  r5 snap=%016llx\n",
-						       (unsigned long long) state.r[1], (unsigned long long) jr[1],
-						       (unsigned long long) state.r[2], (unsigned long long) jr[2],
-						       (unsigned long long) snap[5]);
+							(unsigned long long) state.r[1], (unsigned long long) jr[1],
+							(unsigned long long) state.r[2], (unsigned long long) jr[2],
+							(unsigned long long) snap[5]);
 					}
 					u64 ipr_jit[27];
 					cap_iprs(ipr_jit);   // compiled pass wrote IPRs into live state; check vs interp
 					for (int ii = 0; ii < 27; ii++) if (ipr_jit[ii] != ipr_interp[ii])
 						printf("[JIT][VERIFY] IPR MISMATCH at %016llx slot %d: interp=%016llx jit=%016llx\n",
-						       (unsigned long long) start_virt, ii,
-						       (unsigned long long) ipr_interp[ii], (unsigned long long) ipr_jit[ii]);
+							(unsigned long long) start_virt, ii,
+							(unsigned long long) ipr_interp[ii], (unsigned long long) ipr_jit[ii]);
 					for (int fi = 0; fi < 64; fi++) if (state.f[fi] != f_interp[fi])
 						printf("[JIT][VERIFY] FP MISMATCH at %016llx f%d: interp=%016llx jit=%016llx\n",
-						       (unsigned long long) start_virt, fi,
-						       (unsigned long long) f_interp[fi], (unsigned long long) state.f[fi]);
+							(unsigned long long) start_virt, fi,
+							(unsigned long long) f_interp[fi], (unsigned long long) state.f[fi]);
 					cc_last_sync += std::chrono::nanoseconds(m_jit->verify_compare(start_virt, state.r, jr, vw, b->prefix_len));   // don't bill the progress-print stall to RPCC
 				}
 				state.pc = interp_pc;   // restore; the block's PC write was only for the check
@@ -1083,7 +1097,7 @@ void CAlphaCPU::jit_run(int budget)
 			// A predecessor block's epilogue cache-missed and asked to be linked here. Now
 			// that we know this block is live and compiled, patch its successor pointer so it
 			// jumps straight in instead of returning
-			if (m_link_from) { m_jit->note_link_bail(); ((CJitEngine::JitBlock*) m_link_from)->link = b; m_link_from = nullptr; }
+			if (m_link_from) { m_jit->note_link_bail(); ((CJitEngine::JitBlock*)m_link_from)->link = b; m_link_from = nullptr; }
 			m_jit_budget = budget;   // ceiling for compiled chains (epilogue stops at it)
 #ifdef JIT_STATS
 			const uint64_t _comp_t0 = jit_rdtsc();
@@ -1100,7 +1114,7 @@ void CAlphaCPU::jit_run(int budget)
 			// wall-clock * cpu_hz at the jit_run boundary above, so a hot compiled loop can't
 			// run the cycle counter ahead of real time
 			state.instruction_count += done;
-			cc_large += (u64) done * cc_per_instruction;
+			cc_large += (u64)done * cc_per_instruction;
 			budget -= done;
 #ifdef JIT_STATS
 			cc_last_sync += std::chrono::nanoseconds(m_jit->note_exec(done, 0, _comp_tsc, 0));   // don't bill the stats-print stall to the wall-clock RPCC
@@ -1117,7 +1131,7 @@ void CAlphaCPU::jit_run(int budget)
 		u32 n = 0;
 		u64 expected = start_virt;
 #ifdef JIT_STATS
-			const uint64_t _interp_t0 = jit_rdtsc();
+		const uint64_t _interp_t0 = jit_rdtsc();
 #endif
 		while (budget > 0)
 		{
@@ -1134,19 +1148,19 @@ void CAlphaCPU::jit_run(int budget)
 		// Record only translatable block starts (a translation miss left have_phys false).
 		if (have_phys && state.pc != expected)
 		{
-			CJitEngine::JitBlock* nb = m_jit->record(start_virt, start_phys, start_asn, start_asm, n, (const uint8_t*) dram_ptr);
+			CJitEngine::JitBlock* nb = m_jit->record(start_virt, start_phys, start_asn, start_asm, n, (const uint8_t*)dram_ptr);
 			if (!nb->compiled)
-				m_jit->compile_block(nb, (const uint8_t*) dram_ptr, dram_size,
-				                     (void*) &CAlphaCPU::jit_read, (void*) &CAlphaCPU::jit_write,
-				                     (void*) &CAlphaCPU::jit_opcdec, (void*) &CAlphaCPU::jit_hw_mfpr,
-				                     (void*) &CAlphaCPU::jit_read_phys, (void*) &CAlphaCPU::jit_hw_mtpr,
-				                     (void*) &CAlphaCPU::jit_write_phys, (void*) &CAlphaCPU::jit_indirect,
-				                     (void*) &CAlphaCPU::jit_read_locked, (void*) &CAlphaCPU::jit_stc,
-				                     (void*) &CAlphaCPU::jit_misc, (void*) &CAlphaCPU::jit_read_vpte, (void*) &CAlphaCPU::jit_read_wchk,
-				                     (void*) &CAlphaCPU::jit_itof, (void*) &CAlphaCPU::jit_ftoi,
-				                     (void*) &CAlphaCPU::jit_fltl,
-				                     (void*) &CAlphaCPU::jit_fp_read, (void*) &CAlphaCPU::jit_fp_write,
-				                     (void*) &CAlphaCPU::jit_fltv);
+				m_jit->compile_block(nb, (const uint8_t*)dram_ptr, dram_size,
+					(void*)&CAlphaCPU::jit_read, (void*)&CAlphaCPU::jit_write,
+					(void*)&CAlphaCPU::jit_opcdec, (void*)&CAlphaCPU::jit_hw_mfpr,
+					(void*)&CAlphaCPU::jit_read_phys, (void*)&CAlphaCPU::jit_hw_mtpr,
+					(void*)&CAlphaCPU::jit_write_phys, (void*)&CAlphaCPU::jit_indirect,
+					(void*)&CAlphaCPU::jit_read_locked, (void*)&CAlphaCPU::jit_stc,
+					(void*)&CAlphaCPU::jit_misc, (void*)&CAlphaCPU::jit_read_vpte, (void*)&CAlphaCPU::jit_read_wchk,
+					(void*)&CAlphaCPU::jit_itof, (void*)&CAlphaCPU::jit_ftoi,
+					(void*)&CAlphaCPU::jit_fltl,
+					(void*)&CAlphaCPU::jit_fp_read, (void*)&CAlphaCPU::jit_fp_write,
+					(void*)&CAlphaCPU::jit_fltv);
 		}
 	}
 }
@@ -1156,7 +1170,7 @@ void CAlphaCPU::jit_run(int budget)
 // translation fault / unaligned access - the caller bails to the interpreter
 int CAlphaCPU::jit_read(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 {
-	const u64 amask = (u64) (size_bits / 8) - 1;
+	const u64 amask = (u64)(size_bits / 8) - 1;
 	if (va & amask) return 1;                 // unaligned: let the interpreter handle it
 
 	u64 phys;
@@ -1181,8 +1195,8 @@ int CAlphaCPU::jit_read(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 		phys = e.phys | (va & e.keep_mask);
 		dpc.virt_page = vp;
 		dpc.phys_base = phys & ~U64(0x1FFF);
-		dpc.host_base = ((phys | U64(0x1FFF)) < cpu->dram_size) ? ((u64) cpu->dram_ptr + (phys & ~U64(0x1FFF))) : 0;
-		dpc.cm  = cpu->state.cm;
+		dpc.host_base = ((phys | U64(0x1FFF)) < cpu->dram_size) ? ((u64)cpu->dram_ptr + (phys & ~U64(0x1FFF))) : 0;
+		dpc.cm = cpu->state.cm;
 		dpc.asn = cpu->state.asn0;
 		dpc.valid = true;
 	}
@@ -1204,7 +1218,7 @@ int CAlphaCPU::jit_read(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 			static int n = 0;
 			if (n++ < 50)
 				printf("[JIT] LOAD ADDR MISMATCH: compiled va=%016llx interp va=%016llx\n",
-				       (unsigned long long) va, (unsigned long long) cpu->m_jit_vaddr[cpu->m_jit_vlog_i]);
+					(unsigned long long) va, (unsigned long long) cpu->m_jit_vaddr[cpu->m_jit_vlog_i]);
 		}
 		*out = cpu->m_jit_vlog[cpu->m_jit_vlog_i++];
 		return 0;
@@ -1231,17 +1245,17 @@ int CAlphaCPU::jit_fp_read(CAlphaCPU* cpu, u64 va, u32 fa, u32 descr)
 			static int n = 0;
 			if (n++ < 50)
 				printf("[JIT] FP LOAD ADDR MISMATCH: compiled va=%016llx interp va=%016llx\n",
-				       (unsigned long long) va, (unsigned long long) cpu->m_jit_vaddr[i]);
+					(unsigned long long) va, (unsigned long long) cpu->m_jit_vaddr[i]);
 		}
 		cpu->state.f[fa] = cpu->m_jit_vlog[i];   // logged converted value (no re-convert)
 		return 0;
 	}
 	u64 raw;
-	if (jit_read(cpu, va, (int) (descr & 0xffff), &raw)) return 1;   // production cache read
+	if (jit_read(cpu, va, (int)(descr & 0xffff), &raw)) return 1;   // production cache read
 	switch (descr >> 16)   // fmt: 0=T raw, 1=S ieee, 2=F vax, 3=G vax
 	{
-	case 1:  cpu->state.f[fa] = cpu->ieee_lds((u32) raw); break;   // LDS
-	case 2:  cpu->state.f[fa] = cpu->vax_ldf((u32) raw); break;    // LDF
+	case 1:  cpu->state.f[fa] = cpu->ieee_lds((u32)raw); break;   // LDS
+	case 2:  cpu->state.f[fa] = cpu->vax_ldf((u32)raw); break;    // LDF
 	case 3:  cpu->state.f[fa] = cpu->vax_ldg(raw);       break;    // LDG
 	default: cpu->state.f[fa] = raw;                     break;    // LDT raw
 	}
@@ -1257,12 +1271,12 @@ int CAlphaCPU::jit_fp_write(CAlphaCPU* cpu, u64 va, u32 fa, u32 descr)
 	u64 value;
 	switch (descr >> 16)   // fmt: 0=T raw, 1=S ieee, 2=F vax, 3=G vax
 	{
-	case 1:  value = (u64) cpu->ieee_sts(cpu->state.f[fa]); break;   // STS
-	case 2:  value = (u64) cpu->vax_stf(cpu->state.f[fa]); break;    // STF
+	case 1:  value = (u64)cpu->ieee_sts(cpu->state.f[fa]); break;   // STS
+	case 2:  value = (u64)cpu->vax_stf(cpu->state.f[fa]); break;    // STF
 	case 3:  value = cpu->vax_stg(cpu->state.f[fa]);       break;    // STG
 	default: value = cpu->state.f[fa];                     break;    // STT raw
 	}
-	return jit_write(cpu, va, (int) (descr & 0xffff), value);
+	return jit_write(cpu, va, (int)(descr & 0xffff), value);
 }
 
 // JIT MISC read helper (static). RPCC (sel 0): the wall-clock-pinned cycle counter (DO_RPCC, JIT
@@ -1277,7 +1291,7 @@ u64 CAlphaCPU::jit_misc(CAlphaCPU* cpu, u32 sel)
 	switch (sel)
 	{
 	case 0:                                            // RPCC: Ra = cc_offset : cc[31:0]
-		return ((u64) cpu->state.cc_offset << 32) | (cpu->state.cc & U64(0xffffffff));
+		return ((u64)cpu->state.cc_offset << 32) | (cpu->state.cc & U64(0xffffffff));
 	case 1:                                            // RC: Ra = bIntrFlag; bIntrFlag = false
 	{
 		u64 v = cpu->state.bIntrFlag ? 1 : 0;
@@ -1299,8 +1313,8 @@ int CAlphaCPU::jit_itof(CAlphaCPU* cpu, u32 fc, u64 value, u32 fmt)
 {
 	if (cpu->state.fpen == 0) return 1;       // FEN trap: the interpreter vectors it
 	cpu->state.exc_sum = 0;                   // FPSTART
-	if (fmt == 1)      cpu->state.f[fc] = cpu->ieee_lds((u32) value);
-	else if (fmt == 2) cpu->state.f[fc] = cpu->vax_ldf(SWAP_VAXF((u32) value));
+	if (fmt == 1)      cpu->state.f[fc] = cpu->ieee_lds((u32)value);
+	else if (fmt == 2) cpu->state.f[fc] = cpu->vax_ldf(SWAP_VAXF((u32)value));
 	else               cpu->state.f[fc] = value;
 	return 0;
 }
@@ -1345,7 +1359,7 @@ int CAlphaCPU::jit_fltl(CAlphaCPU* cpu, u32 ins)
 		u64 cvtql_src = f[fb];
 		f[fc] = ((cvtql_src & U64(0xC0000000)) << 32) | ((cvtql_src & U64(0x3FFFFFFF)) << 29);
 		if (FPR_GETSIGN(cvtql_src) ? (cvtql_src < U64(0xFFFFFFFF80000000)) :
-		    (cvtql_src > U64(0x000000007FFFFFFF)))
+			(cvtql_src > U64(0x000000007FFFFFFF)))
 			cpu->write_fpcr_arch(cpu->state.fpcr | FPCR_IOV);
 		break;
 	}
@@ -1368,7 +1382,7 @@ int CAlphaCPU::jit_fltv(CAlphaCPU* cpu, u32 ins)
 	switch (fn)
 	{
 	case 0x0a5: case 0x4a5: f[fc] = (cpu->vax_fcmp(f[fa], f[fb], ins) == 0) ? U64(0x4000000000000000) : 0; break;   // CMPGEQ
-	case 0x0a6: case 0x4a6: f[fc] = (cpu->vax_fcmp(f[fa], f[fb], ins) <  0) ? U64(0x4000000000000000) : 0; break;   // CMPGLT
+	case 0x0a6: case 0x4a6: f[fc] = (cpu->vax_fcmp(f[fa], f[fb], ins) < 0) ? U64(0x4000000000000000) : 0; break;   // CMPGLT
 	case 0x0a7: case 0x4a7: f[fc] = (cpu->vax_fcmp(f[fa], f[fb], ins) <= 0) ? U64(0x4000000000000000) : 0; break;   // CMPGLE
 	case 0x03c: case 0x0bc: f[fc] = cpu->vax_cvtif(f[fb], ins, DT_F); break;   // CVTQF
 	case 0x03e: case 0x0be: f[fc] = cpu->vax_cvtif(f[fb], ins, DT_G); break;   // CVTQG
@@ -1396,7 +1410,7 @@ int CAlphaCPU::jit_fltv(CAlphaCPU* cpu, u32 ins)
 // exclusive monitor. cpu_lock is per-CPU + atomic + idempotent.
 int CAlphaCPU::jit_read_locked(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 {
-	const u64 amask = (u64) (size_bits / 8) - 1;
+	const u64 amask = (u64)(size_bits / 8) - 1;
 	if (va & amask) return 1;                 // unaligned: let the interpreter handle it
 
 	u64 phys;
@@ -1416,8 +1430,8 @@ int CAlphaCPU::jit_read_locked(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 		phys = e.phys | (va & e.keep_mask);
 		dpc.virt_page = vp;
 		dpc.phys_base = phys & ~U64(0x1FFF);
-		dpc.host_base = ((phys | U64(0x1FFF)) < cpu->dram_size) ? ((u64) cpu->dram_ptr + (phys & ~U64(0x1FFF))) : 0;
-		dpc.cm  = cpu->state.cm;
+		dpc.host_base = ((phys | U64(0x1FFF)) < cpu->dram_size) ? ((u64)cpu->dram_ptr + (phys & ~U64(0x1FFF))) : 0;
+		dpc.cm = cpu->state.cm;
 		dpc.asn = cpu->state.asn0;
 		dpc.valid = true;
 	}
@@ -1432,7 +1446,7 @@ int CAlphaCPU::jit_read_locked(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 			static int n = 0;
 			if (n++ < 50)
 				printf("[JIT] LDx_L ADDR MISMATCH: compiled va=%016llx interp va=%016llx\n",
-				       (unsigned long long) va, (unsigned long long) cpu->m_jit_vaddr[cpu->m_jit_vlog_i]);
+					(unsigned long long) va, (unsigned long long) cpu->m_jit_vaddr[cpu->m_jit_vlog_i]);
 		}
 		*out = cpu->m_jit_vlog[cpu->m_jit_vlog_i++];   // the interp pass's (already sign-extended) value
 	}
@@ -1452,7 +1466,7 @@ int CAlphaCPU::jit_read_locked(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 // interpreter vectors the double miss. Skips the data_page_cache (keyed by current cm).
 int CAlphaCPU::jit_read_vpte(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 {
-	const u64 amask = (u64) (size_bits / 8) - 1;
+	const u64 amask = (u64)(size_bits / 8) - 1;
 	if (va & amask) return 1;                 // unaligned: let the interpreter handle it
 
 	const int i = cpu->FindTBEntry(va, ACCESS_READ);
@@ -1472,7 +1486,7 @@ int CAlphaCPU::jit_read_vpte(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 			static int n = 0;
 			if (n++ < 50)
 				printf("[JIT] VPTE ADDR MISMATCH: compiled va=%016llx interp va=%016llx\n",
-				       (unsigned long long) va, (unsigned long long) cpu->m_jit_vaddr[cpu->m_jit_vlog_i]);
+					(unsigned long long) va, (unsigned long long) cpu->m_jit_vaddr[cpu->m_jit_vlog_i]);
 		}
 		*out = cpu->m_jit_vlog[cpu->m_jit_vlog_i++];
 		return 0;
@@ -1489,7 +1503,7 @@ int CAlphaCPU::jit_read_vpte(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 // fault) on miss/protection/fault/MMIO. Verify replays the value like any load.
 int CAlphaCPU::jit_read_wchk(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 {
-	const u64 amask = (u64) (size_bits / 8) - 1;
+	const u64 amask = (u64)(size_bits / 8) - 1;
 	if (va & amask) return 1;                 // unaligned: let the interpreter handle it
 
 	const int i = cpu->FindTBEntry(va, ACCESS_READ);
@@ -1511,7 +1525,7 @@ int CAlphaCPU::jit_read_wchk(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 			static int n = 0;
 			if (n++ < 50)
 				printf("[JIT] WCHK ADDR MISMATCH: compiled va=%016llx interp va=%016llx\n",
-				       (unsigned long long) va, (unsigned long long) cpu->m_jit_vaddr[cpu->m_jit_vlog_i]);
+					(unsigned long long) va, (unsigned long long) cpu->m_jit_vaddr[cpu->m_jit_vlog_i]);
 		}
 		*out = cpu->m_jit_vlog[cpu->m_jit_vlog_i++];
 		return 0;
@@ -1540,13 +1554,13 @@ int CAlphaCPU::jit_read_phys(CAlphaCPU* cpu, u64 phys, int size_bits, u64* out)
 			static int n = 0;
 			if (n++ < 50)
 				printf("[JIT] HW_LD ADDR MISMATCH: compiled pa=%016llx interp pa=%016llx\n",
-				       (unsigned long long) phys, (unsigned long long) cpu->m_jit_vaddr[cpu->m_jit_vlog_i]);
+					(unsigned long long) phys, (unsigned long long) cpu->m_jit_vaddr[cpu->m_jit_vlog_i]);
 		}
 		*out = cpu->m_jit_vlog[cpu->m_jit_vlog_i++];
 		return 0;
 	}
 
-	phys &= ~((u64) (size_bits / 8) - 1);     // align like READ_PHYS_NT (ALIGN_PHYS)
+	phys &= ~((u64)(size_bits / 8) - 1);     // align like READ_PHYS_NT (ALIGN_PHYS)
 	*out = dram_read(cpu->dram_ptr, phys, size_bits);
 	return 0;
 }
@@ -1555,7 +1569,7 @@ int CAlphaCPU::jit_read_phys(CAlphaCPU* cpu, u64 phys, int size_bits, u64* out)
 // jit_read's side-effect-free translation. Returns 0 on success, 1 on fault/unaligned.
 int CAlphaCPU::jit_write(CAlphaCPU* cpu, u64 va, int size_bits, u64 value)
 {
-	const u64 amask = (u64) (size_bits / 8) - 1;
+	const u64 amask = (u64)(size_bits / 8) - 1;
 	if (va & amask) return 1;                 // unaligned: let the interpreter handle it
 
 	// Verify: the interpreter pass already performed (and recorded) this store. Compare
@@ -1569,8 +1583,8 @@ int CAlphaCPU::jit_write(CAlphaCPU* cpu, u64 va, int size_bits, u64 value)
 			static int n = 0;
 			if (n++ < 50)
 				printf("[JIT] STORE MISMATCH: compiled va=%016llx val=%016llx  interp va=%016llx val=%016llx\n",
-				       (unsigned long long) va, (unsigned long long) value,
-				       (unsigned long long) cpu->m_jit_slog_addr[i], (unsigned long long) cpu->m_jit_slog_val[i]);
+					(unsigned long long) va, (unsigned long long) value,
+					(unsigned long long) cpu->m_jit_slog_addr[i], (unsigned long long) cpu->m_jit_slog_val[i]);
 		}
 		return 0;
 	}
@@ -1595,8 +1609,8 @@ int CAlphaCPU::jit_write(CAlphaCPU* cpu, u64 va, int size_bits, u64 value)
 		phys = e.phys | (va & e.keep_mask);
 		dpc.virt_page = vp;
 		dpc.phys_base = phys & ~U64(0x1FFF);
-		dpc.host_base = ((phys | U64(0x1FFF)) < cpu->dram_size) ? ((u64) cpu->dram_ptr + (phys & ~U64(0x1FFF))) : 0;
-		dpc.cm  = cpu->state.cm;
+		dpc.host_base = ((phys | U64(0x1FFF)) < cpu->dram_size) ? ((u64)cpu->dram_ptr + (phys & ~U64(0x1FFF))) : 0;
+		dpc.cm = cpu->state.cm;
 		dpc.asn = cpu->state.asn0;
 		dpc.valid = true;
 	}
@@ -1622,13 +1636,13 @@ int CAlphaCPU::jit_write_phys(CAlphaCPU* cpu, u64 phys, int size_bits, u64 value
 			static int n = 0;
 			if (n++ < 50)
 				printf("[JIT] HW_ST STORE MISMATCH: compiled pa=%016llx val=%016llx  interp pa=%016llx val=%016llx\n",
-				       (unsigned long long) phys, (unsigned long long) value,
-				       (unsigned long long) cpu->m_jit_slog_addr[i], (unsigned long long) cpu->m_jit_slog_val[i]);
+					(unsigned long long) phys, (unsigned long long) value,
+					(unsigned long long) cpu->m_jit_slog_addr[i], (unsigned long long) cpu->m_jit_slog_val[i]);
 		}
 		return 0;
 	}
 
-	phys &= ~((u64) (size_bits / 8) - 1);     // align like WRITE_PHYS_NT (ALIGN_PHYS)
+	phys &= ~((u64)(size_bits / 8) - 1);     // align like WRITE_PHYS_NT (ALIGN_PHYS)
 	if (phys >= cpu->dram_size)
 		return 1;                              // MMIO: let the interpreter do the ordered write
 	dram_write(cpu->dram_ptr, phys, size_bits, value);
@@ -1649,13 +1663,13 @@ u64 CAlphaCPU::jit_stc(CAlphaCPU* cpu, u64 va, int size_bits, u64 value)
 			static int n = 0;
 			if (n++ < 50)
 				printf("[JIT] STx_C MISMATCH: compiled va=%016llx val=%016llx ok=%llu  interp va=%016llx val=%016llx\n",
-				       (unsigned long long) va, (unsigned long long) value, (unsigned long long) success,
-				       (unsigned long long) cpu->m_jit_slog_addr[i], (unsigned long long) cpu->m_jit_slog_val[i]);
+					(unsigned long long) va, (unsigned long long) value, (unsigned long long) success,
+					(unsigned long long) cpu->m_jit_slog_addr[i], (unsigned long long) cpu->m_jit_slog_val[i]);
 		}
 		return success;
 	}
 
-	const u64 amask = (u64) (size_bits / 8) - 1;
+	const u64 amask = (u64)(size_bits / 8) - 1;
 	if (va & amask) return U64(0x100);        // unaligned (also a page-cross): the interpreter handles it
 
 	// Side-effect-free write-path translation (mirror jit_write); bail to the interpreter on a TB
@@ -1677,8 +1691,8 @@ u64 CAlphaCPU::jit_stc(CAlphaCPU* cpu, u64 va, int size_bits, u64 value)
 		phys = e.phys | (va & e.keep_mask);
 		dpc.virt_page = vp;
 		dpc.phys_base = phys & ~U64(0x1FFF);
-		dpc.host_base = ((phys | U64(0x1FFF)) < cpu->dram_size) ? ((u64) cpu->dram_ptr + (phys & ~U64(0x1FFF))) : 0;
-		dpc.cm  = cpu->state.cm;
+		dpc.host_base = ((phys | U64(0x1FFF)) < cpu->dram_size) ? ((u64)cpu->dram_ptr + (phys & ~U64(0x1FFF))) : 0;
+		dpc.cm = cpu->state.cm;
 		dpc.asn = cpu->state.asn0;
 		dpc.valid = true;
 	}
@@ -1711,7 +1725,7 @@ void CAlphaCPU::jit_opcdec(CAlphaCPU* cpu, u64 cpc)
 /* HW_MFPR (PALmode): return the IPR selected by (ins>>8)&0xff. */
 u64 CAlphaCPU::jit_hw_mfpr(CAlphaCPU* cpu, u32 ins, u64 cur)
 {
-	const auto& state    = cpu->state;
+	const auto& state = cpu->state;
 	const u32   function = (ins >> 8) & 0xff;
 
 	// ISUM (0x0d) reads the live async interrupt-request lines (eir/slr/crr/pcr), which the
@@ -1721,8 +1735,8 @@ u64 CAlphaCPU::jit_hw_mfpr(CAlphaCPU* cpu, u32 ins, u64 cur)
 		return cpu->m_jit_vlog[cpu->m_jit_vlog_i++];
 
 	if ((function & 0xc0) == 0x40)   // PCTX
-		return ((u64) state.asn << 39) | ((u64) state.astrr << 9) | ((u64) state.aster << 5)
-		     | (state.fpen ? U64(0x1) << 2 : 0) | (state.ppcen ? U64(0x1) << 1 : 0);
+		return ((u64)state.asn << 39) | ((u64)state.astrr << 9) | ((u64)state.aster << 5)
+		| (state.fpen ? U64(0x1) << 2 : 0) | (state.ppcen ? U64(0x1) << 1 : 0);
 
 	switch (function)
 	{
@@ -1730,32 +1744,32 @@ u64 CAlphaCPU::jit_hw_mfpr(CAlphaCPU* cpu, u32 ins, u64 cur)
 	case 0x06: return state.exc_addr;                        // EXC_ADDR
 	case 0x07: return cpu->va_form(state.exc_addr, true);    // IVA_FORM
 	case 0x08: case 0x09: case 0x0a: case 0x0b:              // IER_CM / CM / IER
-		return (((u64) state.eien) << 33) | (((u64) state.slen) << 32)
-		     | (((u64) state.cren) << 31) | (((u64) state.pcen) << 29)
-		     | (((u64) state.sien) << 13) | (((u64) state.asten) << 13)
-		     | (((u64) state.cm) << 3);
-	case 0x0c: return ((u64) state.sir) << 13;               // SIRR
+		return (((u64)state.eien) << 33) | (((u64)state.slen) << 32)
+			| (((u64)state.cren) << 31) | (((u64)state.pcen) << 29)
+			| (((u64)state.sien) << 13) | (((u64)state.asten) << 13)
+			| (((u64)state.cm) << 3);
+	case 0x0c: return ((u64)state.sir) << 13;               // SIRR
 	case 0x0d:                                               // ISUM (production path: read the live async
 		// interrupt-request lines; the verify replays via the m_jit_vreplay short-circuit at the top).
-		return (((u64) (state.eir & state.eien)) << 33)
-		     | (((u64) (state.slr & state.slen)) << 32)
-		     | (((u64) (state.crr & state.cren)) << 31)
-		     | (((u64) (state.pcr & state.pcen)) << 29)
-		     | (((u64) (state.sir & state.sien)) << 13)
-		     | (((u64) (((U64(0x1) << (state.cm + 1)) - 1) & state.aster & state.astrr & (state.asten * 0x3))) << 3)
-		     | (((u64) (((U64(0x1) << (state.cm + 1)) - 1) & state.aster & state.astrr & (state.asten * 0xc))) << 7);
+		return (((u64)(state.eir & state.eien)) << 33)
+			| (((u64)(state.slr & state.slen)) << 32)
+			| (((u64)(state.crr & state.cren)) << 31)
+			| (((u64)(state.pcr & state.pcen)) << 29)
+			| (((u64)(state.sir & state.sien)) << 13)
+			| (((u64)(((U64(0x1) << (state.cm + 1)) - 1) & state.aster & state.astrr & (state.asten * 0x3))) << 3)
+			| (((u64)(((U64(0x1) << (state.cm + 1)) - 1) & state.aster & state.astrr & (state.asten * 0xc))) << 7);
 	case 0x0f: return state.exc_sum;                         // EXC_SUM
 	case 0x10: return state.pal_base;                        // PAL_BASE
 	case 0x11:                                               // I_CTL
-		return state.i_ctl_other | (((u64) CPU_CHIP_ID) << 24) | (u64) state.i_ctl_vptb
-		     | (((u64) state.i_ctl_va_mode) << 15) | (state.hwe ? U64(0x1) << 12 : 0)
-		     | (state.sde ? U64(0x1) << 7 : 0) | (((u64) state.i_ctl_spe) << 3);
+		return state.i_ctl_other | (((u64)CPU_CHIP_ID) << 24) | (u64)state.i_ctl_vptb
+			| (((u64)state.i_ctl_va_mode) << 15) | (state.hwe ? U64(0x1) << 12 : 0)
+			| (state.sde ? U64(0x1) << 7 : 0) | (((u64)state.i_ctl_spe) << 3);
 	case 0x14: return state.pctr_ctl;                        // PCTR_CTL
 	case 0x16: return state.i_stat;                          // I_STAT
 	case 0x27: return state.mm_stat;                         // MM_STAT
 	case 0x2a: return state.dc_stat;                         // DC_STAT
 	case 0x2b: return 0;                                     // C_DATA
-	case 0xc0: return (((u64) state.cc_offset) << 32) | (state.cc & U64(0xffffffff));   // CC
+	case 0xc0: return (((u64)state.cc_offset) << 32) | (state.cc & U64(0xffffffff));   // CC
 	case 0xc2: return state.fault_va;                        // VA
 	case 0xc3: return cpu->va_form(state.va_form_va, false); // VA_FORM
 	}
@@ -1773,10 +1787,10 @@ void CAlphaCPU::jit_hw_mtpr(CAlphaCPU* cpu, u32 function, u64 value)
 	// ASN write (bit 0, dpc flush + asn-epoch bump) is never compiled -- classify() routes it to OP_NONE.
 	if ((function & 0xc0) == 0x40)
 	{
-		if (function & 2)  { cpu->state.aster = (int) (value >> 5) & 0xf; cpu->state.check_int = true; }
-		if (function & 4)  { cpu->state.astrr = (int) (value >> 9) & 0xf; cpu->state.check_int = true; }
-		if (function & 8)    cpu->state.ppcen = (int) (value >> 1) & 1;
-		if (function & 16)   cpu->state.fpen  = (int) (value >> 2) & 1;
+		if (function & 2) { cpu->state.aster = (int)(value >> 5) & 0xf; cpu->state.check_int = true; }
+		if (function & 4) { cpu->state.astrr = (int)(value >> 9) & 0xf; cpu->state.check_int = true; }
+		if (function & 8)    cpu->state.ppcen = (int)(value >> 1) & 1;
+		if (function & 16)   cpu->state.fpen = (int)(value >> 2) & 1;
 		return;
 	}
 	switch (function)
@@ -1788,42 +1802,42 @@ void CAlphaCPU::jit_hw_mtpr(CAlphaCPU* cpu, u32 function, u64 value)
 	case 0x04: cpu->tbis(value, ACCESS_EXEC); break;                            // ITB_IS (single ITB invalidate)
 	case 0x13: cpu->flush_icache(); break;                                      // IC_FLUSH (lazy flush + deferred reclaim)
 	case 0x09:                                                                   // CM (current mode)
-		cpu->state.cm = (int) (value >> 3) & 3;
+		cpu->state.cm = (int)(value >> 3) & 3;
 		cpu->state.check_int = true;
 		break;
 	case 0x0b:                                                                   // IER_CM: write CM, then fall into IER
-		cpu->state.cm = (int) (value >> 3) & 3;
+		cpu->state.cm = (int)(value >> 3) & 3;
 		cpu->state.check_int = true;
 		[[fallthrough]];
 	case 0x0a:                                                                   // IER
-		cpu->state.asten = (int) (value >> 13) & 1;
-		cpu->state.sien  = (int) (value >> 13) & 0xfffe;
-		cpu->state.pcen  = (int) (value >> 29) & 3;
-		cpu->state.cren  = (int) (value >> 31) & 1;
-		cpu->state.slen  = (int) (value >> 32) & 1;
-		cpu->state.eien  = (int) (value >> 33) & 0x3f;
+		cpu->state.asten = (int)(value >> 13) & 1;
+		cpu->state.sien = (int)(value >> 13) & 0xfffe;
+		cpu->state.pcen = (int)(value >> 29) & 3;
+		cpu->state.cren = (int)(value >> 31) & 1;
+		cpu->state.slen = (int)(value >> 32) & 1;
+		cpu->state.eien = (int)(value >> 33) & 0x3f;
 		cpu->state.check_int = true;                       // newly enabled pending ints must be polled
 		break;
 	case 0x0c:                                                                   // SIRR (software interrupt request)
-		cpu->state.sir = (int) (value >> 13) & 0xfffe;
+		cpu->state.sir = (int)(value >> 13) & 0xfffe;
 		cpu->state.check_int = true;
 		break;
 	case 0x11:                                                                   // I_CTL (terminator; mirrors DO_HW_MTPR)
-		cpu->state.i_ctl_other   = (value & U64(0x00000000006e2f67)) | U64(0x0000000000100000);  // bit 20 hardwired-on (EV6/EV68)
-		cpu->state.i_ctl_vptb    = sext_u64_48(value & U64(0x0000ffffc0000000));
-		cpu->state.i_ctl_spe     = (int) ((value >> 3) & 7);
-		cpu->state.sde           = (value >> 7) & 1;
-		cpu->state.hwe           = (value >> 12) & 1;
-		cpu->state.i_ctl_va_mode = (int) (value >> 15) & 3;
+		cpu->state.i_ctl_other = (value & U64(0x00000000006e2f67)) | U64(0x0000000000100000);  // bit 20 hardwired-on (EV6/EV68)
+		cpu->state.i_ctl_vptb = sext_u64_48(value & U64(0x0000ffffc0000000));
+		cpu->state.i_ctl_spe = (int)((value >> 3) & 7);
+		cpu->state.sde = (value >> 7) & 1;
+		cpu->state.hwe = (value >> 12) & 1;
+		cpu->state.i_ctl_va_mode = (int)(value >> 15) & 3;
 		break;
 	case 0x14: cpu->state.pctr_ctl = value & U64(0xffffffffffffffdf); break;     // PCTR_CTL
 	case 0x20: cpu->last_dtb_virt[0] = value; break;                             // DTB_TAG0
 	case 0x21: cpu->add_tb_d(cpu->last_dtb_virt[0], value, 0); break;            // DTB_PTE0 (DTB fill)
-	case 0x26: cpu->state.alt_cm = (int) (value & 3); break;                     // DTB_ALTMODE
+	case 0x26: cpu->state.alt_cm = (int)(value & 3); break;                     // DTB_ALTMODE
 	case 0x29: cpu->state.dc_ctl = value; break;                                 // DC_CTL
 	case 0xa0: cpu->last_dtb_virt[1] = value; break;                             // DTB_TAG1
 	case 0xa1: cpu->add_tb_d(cpu->last_dtb_virt[1], value, 1); break;            // DTB_PTE1 (DTB fill)
-	case 0xc0: cpu->state.cc_offset = (u32) (value >> 32); break;                // CC
+	case 0xc0: cpu->state.cc_offset = (u32)(value >> 32); break;                // CC
 	}
 }
 
@@ -1835,7 +1849,7 @@ void CAlphaCPU::jit_hw_mtpr(CAlphaCPU* cpu, u32 function, u64 value)
 void* CAlphaCPU::jit_indirect(CAlphaCPU* cpu, u64 target)
 {
 	cpu->m_jit->note_jmp_attempt();
-	CJitEngine::JitBlock* b = cpu->m_jit->lookup(target, (u32) cpu->state.asn);
+	CJitEngine::JitBlock* b = cpu->m_jit->lookup(target, (u32)cpu->state.asn);
 	if (!b || !b->jit_body) return nullptr;
 	if (target & 1)
 	{
@@ -1865,7 +1879,7 @@ void* CAlphaCPU::jit_indirect(CAlphaCPU* cpu, u64 target)
 		static int n = 0;
 		if (n++ < 50)
 			printf("[JIT][CPU%d] INDIRECT STALE: target=%016llx block_phys=%016llx -- recompiling\n",
-			       (int) cpu->state.iProcNum, (unsigned long long) target, (unsigned long long) b->phys);
+				(int)cpu->state.iProcNum, (unsigned long long) target, (unsigned long long) b->phys);
 		return nullptr;
 	}
 	b->vgen = gen;                                             // re-validated -> fast path henceforth
@@ -1984,7 +1998,7 @@ void CAlphaCPU::execute()
 		}
 	}
 
-	_next_instruction :
+_next_instruction:
 	if (--_batch_budget <= 0)
 	{
 		// Flush remaining accumulated counters before returning
@@ -2317,7 +2331,7 @@ void CAlphaCPU::execute()
 			{
 				int _siq_line = state.last_found_icache;
 				seq_line_ptr = state.icache[_siq_line].data;
-				int _siq_word = (int) ((state.pc >> 2) & ICACHE_INDEX_MASK);
+				int _siq_word = (int)((state.pc >> 2) & ICACHE_INDEX_MASK);
 				seq_offset = _siq_word + 1;
 				seq_remaining = ICACHE_LINE_SIZE - seq_offset;
 				seq_next_pc = (state.pc & ~U64(0x3)) + 4;
@@ -3129,7 +3143,7 @@ int CAlphaCPU::FindTBEntry(u64 virt, int flags)
 static inline u64 alpha_sext_u64_43(u64 a)
 {
 	return (a & U64(0x0000040000000000)) ? (a | U64(0xfffff80000000000))
-	                                     : (a & U64(0x000007ffffffffff));
+		: (a & U64(0x000007ffffffffff));
 }
 
 static inline bool alpha_valid_va_form(u64 virt, bool va48)
@@ -3232,7 +3246,7 @@ int CAlphaCPU::virt2phys(u64 virt, u64* phys, int flags, bool* asm_bit, u32 ins)
 	 * Access-check current mode selection.
 	 *  - VPTE (HRM 6.4.1 Table 6-3): Virtual/VPTE accesses are LD_VPTE
 	 *    page-table fetches and use *kernel mode* for permission checks
-	 *    regardless of executing CM. 
+	 *    regardless of executing CM.
 	 *  - ALT (HRM 6.4.1 Table 6-3 row 1102, Table 6-4 row 1102): the
 	 *    /alt variants use DTB_ALT_MODE for permission checks.
 	 *  - Otherwise: current mode.
@@ -3240,11 +3254,11 @@ int CAlphaCPU::virt2phys(u64 virt, u64* phys, int flags, bool* asm_bit, u32 ins)
 	 * any valid HW_LD encoding, but the precedence is clear).
 	 */
 	int   cm = (flags & VPTE) ? 0 :
-	           (flags & ALT)  ? state.alt_cm :
-	                            state.cm;
+		(flags & ALT) ? state.alt_cm :
+		state.cm;
 	bool  forreal = !(flags & FAKE);
 	bool  va48 = (flags & ACCESS_EXEC) ? (state.i_ctl_va_mode & 1)
-	                                   : (state.va_ctl_va_mode & 1);
+		: (state.va_ctl_va_mode & 1);
 
 #if defined IDB
 	if (bListing)
@@ -3469,7 +3483,7 @@ int CAlphaCPU::virt2phys(u64 virt, u64* phys, int flags, bool* asm_bit, u32 ins)
 		// the natural-direction access bit is clear OR (when WRCHK is set on a
 		// read) the write access bit is also clear.
 		if (!state.tb[t][i].access[flags & ACCESS_WRITE][cm]
-		    || ((flags & WRCHK) && !state.tb[t][i].access[1][cm]))
+			|| ((flags & WRCHK) && !state.tb[t][i].access[1][cm]))
 		{
 #if defined(DEBUG_TB)
 			if (forreal)
@@ -3536,7 +3550,7 @@ int CAlphaCPU::virt2phys(u64 virt, u64* phys, int flags, bool* asm_bit, u32 ins)
 		// WRCHK additionally requires that the FOW bit be clear -- HRM 6.4.1
 		// WrChk variants check both FOR and FOW.
 		if (state.tb[t][i].fault[flags & ACCESS_MODE]
-		    || ((flags & WRCHK) && state.tb[t][i].fault[1]))
+			|| ((flags & WRCHK) && state.tb[t][i].fault[1]))
 		{
 #if defined(DEBUG_TB)
 			if (forreal)
@@ -3582,7 +3596,7 @@ int CAlphaCPU::virt2phys(u64 virt, u64* phys, int flags, bool* asm_bit, u32 ins)
 				 * FOW [bit 3] is set when a fault-on-write error occurs.
 				 * For HW_LD WrChk variants the chip is performing both a
 				 * read AND a write-protection check, so PTE[FOW] (if set)
-				 * is reportable too 
+				 * is reportable too
 				 */
 				u32 opcode = I_GETOP(ins);
 				int for_bit =
@@ -3590,7 +3604,7 @@ int CAlphaCPU::virt2phys(u64 virt, u64* phys, int flags, bool* asm_bit, u32 ins)
 					&& state.tb[t][i].fault[0] ? 4 : 0;
 				int fow_bit =
 					(((flags & ACCESS_WRITE) || (flags & WRCHK))
-					 && state.tb[t][i].fault[1]) ? 8 : 0;
+						&& state.tb[t][i].fault[1]) ? 8 : 0;
 				state.mm_stat =
 					(
 						(opcode == 0x1b || opcode == 0x1f) ? opcode -
@@ -3650,16 +3664,16 @@ int CAlphaCPU::virt2phys(u64 virt, u64* phys, int flags, bool* asm_bit, u32 ins)
 #define GH_3_PHYS   U64(0x00000fffffc00000) /* PA <43:22> */
 #define GH_3_KEEP   U64(0x00000000003fffff) /* VA <21:0>  */
 
-/**
- * \brief Add translation-buffer entry
- *
- * Add a translation-buffer entry to one of the translation buffers.
- *
- * \param virt    Virtual address.
- * \param pte     Translation in DTB_PTE format (see add_tb_d).
- * \param flags   ACCESS_EXEC determines which translation buffer to use.
- * \param asn     Address space number latched by the PAL fill port.
- **/
+ /**
+  * \brief Add translation-buffer entry
+  *
+  * Add a translation-buffer entry to one of the translation buffers.
+  *
+  * \param virt    Virtual address.
+  * \param pte     Translation in DTB_PTE format (see add_tb_d).
+  * \param flags   ACCESS_EXEC determines which translation buffer to use.
+  * \param asn     Address space number latched by the PAL fill port.
+  **/
 void CAlphaCPU::add_tb(u64 virt, u64 pte_phys, u64 pte_flags, int flags, int asn)
 {
 	int t = (flags & ACCESS_EXEC) ? TB_INDEX_ITB : TB_INDEX_DATA;
@@ -3700,8 +3714,8 @@ void CAlphaCPU::add_tb(u64 virt, u64 pte_phys, u64 pte_flags, int flags, int asn
 	for (int j = 0; j < TB_ENTRIES; j++)
 	{
 		if (state.tb[t][j].valid
-		    && !((state.tb[t][j].virt ^ virt) & state.tb[t][j].match_mask)
-		    && (state.tb[t][j].asm_bit || state.tb[t][j].asn == asn))
+			&& !((state.tb[t][j].virt ^ virt) & state.tb[t][j].match_mask)
+			&& (state.tb[t][j].asm_bit || state.tb[t][j].asn == asn))
 		{
 			i = j;
 			break;
@@ -3714,7 +3728,7 @@ void CAlphaCPU::add_tb(u64 virt, u64 pte_phys, u64 pte_flags, int flags, int asn
 	// so bump the generation. A next_tb eviction (i reassigned below) replaces a DIFFERENT vpage 
 	// (not a remap of this one) and must NOT bump.
 	const bool itb_remap = (t == TB_INDEX_ITB) && (i >= 0)
-	                       && (state.tb[t][i].phys != (pte_phys & phys_mask));
+		&& (state.tb[t][i].phys != (pte_phys & phys_mask));
 #endif
 
 	if (i < 0)
@@ -3909,8 +3923,8 @@ void CAlphaCPU::tbis_d(u64 virt, int asn)
 	for (i = 0; i < TB_ENTRIES; i++)
 	{
 		if (state.tb[TB_INDEX_DATA][i].valid
-		    && !((state.tb[TB_INDEX_DATA][i].virt ^ virt) & state.tb[TB_INDEX_DATA][i].match_mask)
-		    && (state.tb[TB_INDEX_DATA][i].asm_bit || state.tb[TB_INDEX_DATA][i].asn == asn))
+			&& !((state.tb[TB_INDEX_DATA][i].virt ^ virt) & state.tb[TB_INDEX_DATA][i].match_mask)
+			&& (state.tb[TB_INDEX_DATA][i].asm_bit || state.tb[TB_INDEX_DATA][i].asn == asn))
 		{
 			state.tb[TB_INDEX_DATA][i].valid = false;
 		}
