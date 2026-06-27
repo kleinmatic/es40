@@ -402,6 +402,7 @@ CJitEngine::CJitEngine(int cpu_id) : m_cpu_id(cpu_id), m_recorded(0), m_code_byt
   m_tsc_window_start = jit_rdtsc();
   m_bail_link = m_jmp_attempt = m_jmp_hit = 0;
   m_fresh_cold = m_fresh_tag = m_fresh_asn = m_fresh_phys = m_fresh_hash = 0;
+  m_trace_formed = m_trace_entered = m_trace_exits = m_trace_stale = 0;
   memset(m_term_op, 0, sizeof(m_term_op));
   memset(m_pal_func, 0, sizeof(m_pal_func));
   memset(m_mtpr_func, 0, sizeof(m_mtpr_func));
@@ -415,6 +416,9 @@ CJitEngine::CJitEngine(int cpu_id) : m_cpu_id(cpu_id), m_recorded(0), m_code_byt
   m_disasm_fp = fopen(name, "w");
   if (!m_disasm_fp)
     fprintf(stderr, "[JIT][CPU%d] could not open %s for the disassembly trace\n", m_cpu_id, name);
+#endif
+#ifdef JIT_VERIFY
+  if (cpu_id == 0) trace_selftest();   // M0: validate trace_ok's source-coherence once (SMC/IMB/remap)
 #endif
 }
 
@@ -537,6 +541,41 @@ bool CJitEngine::trace_ok(TraceFragment* t, uint64_t head_live_phys, const uint8
   t->flush_gen = m_flush_gen;
   return true;
 }
+
+#ifdef JIT_VERIFY
+// unit-test trace_ok's source-coherence decision (SMC/IMB, ITB-remap, head-remap, multi-segment) 
+// WITHOUT real traces or the emitter. Mutates m_itb_gen/m_flush_gen but saves/restores; runs 
+// once at ctor when the engine is fresh (counters 0, no live blocks). A FAIL here means the
+// trace tier's coherence is broken 
+void CJitEngine::trace_selftest()
+{
+  const uint64_t save_itb = m_itb_gen, save_flush = m_flush_gen;
+  uint32_t mem[8] = { 0x11111111, 0x22222222, 0x33333333, 0x44444444,
+                      0x55555555, 0x66666666, 0x77777777, 0x88888888 };
+  const uint8_t* d = (const uint8_t*) mem;
+
+  TraceFragment t = {};
+  t.valid = true; t.head_tag = 0x2000; t.asn = 1; t.n_segs = 2;
+  t.segs[0] = { 0x2000, 0,  4, false, 1, src_hash(d + 0,  4) };   // words[0..3] at phys 0
+  t.segs[1] = { 0x2010, 16, 4, false, 1, src_hash(d + 16, 4) };   // words[4..7] at phys 16
+  t.vgen = m_itb_gen + m_flush_gen;
+
+  bool ok = true;
+  ok &= ( trace_ok(&t, 0,   d) == true  );    // 1. fresh: epoch + head-phys match -> enter
+  ok &= ( trace_ok(&t, 999, d) == false );    // 2. head remap / ASN-recycle: live head phys differs -> drop
+  ++m_itb_gen;                                 // 3. ITB-invalidate, bytes unchanged:
+  ok &= ( trace_ok(&t, 0,   d) == true  );    //    epoch bumps, re-hash matches -> keep ...
+  ok &= ( t.vgen == m_itb_gen + m_flush_gen ); //    ... and re-stamped to the new epoch
+  mem[5] = 0xDEADBEEF; ++m_flush_gen;          // 4. SMC on interior seg1 + IMB (flush bump):
+  ok &= ( trace_ok(&t, 0,   d) == false );    //    re-hash mismatch -> drop
+  mem[5] = 0x66666666;                         // 5. restore the byte, epoch still bumped:
+  ok &= ( trace_ok(&t, 0,   d) == true  );    //    re-hash matches again -> keep
+
+  printf("[JIT][CPU%d] trace_ok self-test (SMC/IMB/ITB-remap/head-remap): %s\n",
+         m_cpu_id, ok ? "PASS" : "*** FAIL ***");
+  m_itb_gen = save_itb; m_flush_gen = save_flush;
+}
+#endif
 
 // Free ALL compiled code (delete+new of the runtime; reset()-and-reuse corrupted the JitAllocator
 // block tree) and drop every slot's now-dangling pointers. Safe only from this CPU's cold path

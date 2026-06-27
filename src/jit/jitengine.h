@@ -204,6 +204,7 @@ public:
   // from the wall-clock-pinned RPCC (same Heisenberg fix as note_exec).
   uint64_t verify_compare(uint64_t blk_virt, const uint64_t* interp, const uint64_t* jit,
                           const uint32_t* words, uint32_t nwords);
+  void trace_selftest();   // M0: unit-test trace_ok's source-coherence (SMC/IMB/ITB-remap/head-remap)
 #endif
 
 #ifdef JIT_STATS
@@ -248,6 +249,7 @@ private:
   uint64_t m_tsc_window_start;                  // host TSC at window start (the time-split denominator)
   uint64_t m_bail_link, m_jmp_attempt, m_jmp_hit;   // windowed: link-miss bails, jit_indirect attempts/hits
   uint64_t m_fresh_cold, m_fresh_tag, m_fresh_asn, m_fresh_phys, m_fresh_hash;  // windowed: record() step-4 fresh-compile reason
+  uint64_t m_trace_formed, m_trace_entered, m_trace_exits, m_trace_stale;       // windowed: trace tier activity (M1+)
   uint64_t m_term_op[64];                       // cumulative: opcode that ended a block's compiled prefix
   uint64_t m_pal_func[256];                     // cumulative: CALL_PAL function code that ended a block
   uint64_t m_mtpr_func[256];                    // cumulative: HW_MTPR (0x1d) IPR index that ended a block
