@@ -879,7 +879,7 @@ void CAlphaCPU::jit_run(int budget)
 				// this same vlog, but its address is physical (untranslated) with a 12-bit disp.
 				// Func 5 (quad VPTE) too -- its logged va is virtual, jit_read_vpte's replay key.
 				const bool is_hwld = (opc == 0x1b) &&
-				                     ((((ins >> 12) & 0xf) <= 1) || (((ins >> 12) & 0xf) == 5));
+				                     ((((ins >> 12) & 0xf) <= 1) || (((ins >> 12) & 0xf) == 5) || (((ins >> 12) & 0xf) == 10));
 				// RPCC/RC/RS (MISC 0x18) and ISUM (HW_MFPR 0x19 fn 0x0d) read CPU state the verify can't
 				// re-derive; the compiled forms pull their value from this same load log (jit_misc /
 				// jit_hw_mfpr replay it), so log them like loads.
@@ -1142,7 +1142,7 @@ void CAlphaCPU::jit_run(int budget)
 				                     (void*) &CAlphaCPU::jit_read_phys, (void*) &CAlphaCPU::jit_hw_mtpr,
 				                     (void*) &CAlphaCPU::jit_write_phys, (void*) &CAlphaCPU::jit_indirect,
 				                     (void*) &CAlphaCPU::jit_read_locked, (void*) &CAlphaCPU::jit_stc,
-				                     (void*) &CAlphaCPU::jit_misc, (void*) &CAlphaCPU::jit_read_vpte,
+				                     (void*) &CAlphaCPU::jit_misc, (void*) &CAlphaCPU::jit_read_vpte, (void*) &CAlphaCPU::jit_read_wchk,
 				                     (void*) &CAlphaCPU::jit_itof, (void*) &CAlphaCPU::jit_ftoi,
 				                     (void*) &CAlphaCPU::jit_fltl,
 				                     (void*) &CAlphaCPU::jit_fp_read, (void*) &CAlphaCPU::jit_fp_write,
@@ -1472,6 +1472,45 @@ int CAlphaCPU::jit_read_vpte(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
 			static int n = 0;
 			if (n++ < 50)
 				printf("[JIT] VPTE ADDR MISMATCH: compiled va=%016llx interp va=%016llx\n",
+				       (unsigned long long) va, (unsigned long long) cpu->m_jit_vaddr[cpu->m_jit_vlog_i]);
+		}
+		*out = cpu->m_jit_vlog[cpu->m_jit_vlog_i++];
+		return 0;
+	}
+
+	*out = dram_read(cpu->dram_ptr, phys, size_bits);
+	return 0;
+}
+
+// JIT HW_LD WrChk helper (static). HW_LD func 0xa (DO_HW_LDL case 10, HRM TYPE 1012 WrChk): a
+// longword VIRTUAL read that ALSO requires WRITE access -- the interpreter ACVs if read OR write
+// protection is clear (virt2phys WRCHK) and faults FOR/FOW. Side-effect-free TB probe mirroring
+// jit_read_vpte but checked vs CURRENT mode (not kernel); bails (interp re-runs + vectors the
+// fault) on miss/protection/fault/MMIO. Verify replays the value like any load.
+int CAlphaCPU::jit_read_wchk(CAlphaCPU* cpu, u64 va, int size_bits, u64* out)
+{
+	const u64 amask = (u64) (size_bits / 8) - 1;
+	if (va & amask) return 1;                 // unaligned: let the interpreter handle it
+
+	const int i = cpu->FindTBEntry(va, ACCESS_READ);
+	if (i < 0) return 1;                       // TB miss
+	const auto& e = cpu->state.tb[TB_INDEX_DATA][i];
+	const int cm = cpu->state.cm;
+	if (!e.access[0][cm]) return 1;            // no read access (ACV)
+	if (!e.access[1][cm]) return 1;            // no write access -- WrChk fails (ACV)
+	if (e.fault[0] || e.fault[1]) return 1;    // FOR/FOW: bail so the interpreter vectors the fault
+	const u64 phys = e.phys | (va & e.keep_mask);
+
+	if (phys >= cpu->dram_size)               // MMIO: bail before the replay (mirrors jit_read_vpte)
+		return 1;
+
+	if (cpu->m_jit_vreplay)
+	{
+		if (va != cpu->m_jit_vaddr[cpu->m_jit_vlog_i])
+		{
+			static int n = 0;
+			if (n++ < 50)
+				printf("[JIT] WCHK ADDR MISMATCH: compiled va=%016llx interp va=%016llx\n",
 				       (unsigned long long) va, (unsigned long long) cpu->m_jit_vaddr[cpu->m_jit_vlog_i]);
 		}
 		*out = cpu->m_jit_vlog[cpu->m_jit_vlog_i++];

@@ -77,6 +77,7 @@ enum SafeOp {
   OP_HW_MFPR,                    // HW_MFPR (0x19), PALmode only: Ra = IPR[(ins>>8)&0xff] via helper
   OP_HW_LDL, OP_HW_LDQ,          // HW_LD (0x1b) physical func 0/1, PALmode only: Ra = phys[Rb+disp12]
   OP_HW_LDQ_VPTE,                // HW_LD (0x1b) func 5: virtual PTE fetch, access-checked vs KERNEL mode
+  OP_HW_LDL_WCHK,                // HW_LD (0x1b) func 0xa: longword virtual read + write-check (WrChk)
   OP_HW_MTPR,                    // HW_MTPR (0x1d) side-effect-free IPRs, PALmode only: IPR[fn] = Rb
   OP_HW_MTPR_TERM,               // HW_MTPR I_CTL (0x11): writes SDE/SPE/VA mode -> terminate, re-dispatch past it
   OP_HW_STL, OP_HW_STQ,          // HW_ST (0x1f) physical func 0/1, PALmode only: phys[Rb+disp12] = Ra
@@ -280,8 +281,8 @@ SafeOp classify(uint32_t ins, bool pal_block)
       return known ? OP_HW_MFPR : OP_NONE;
     }
     case 0x1b: {                // HW_LD: read phys[Rb+disp12] -> Ra. PALmode-only. Compile the
-      // physical forms (func 0/1) and the quad VPTE fetch (func 5, kernel-checked -- see
-      // jit_read_vpte). Locked, virtual, alt and write-check forms stay interpreted.
+      // physical forms (func 0/1), the quad VPTE fetch (func 5, kernel-checked -- jit_read_vpte),
+      // and the longword virtual WrChk (func 0xa, jit_read_wchk). Locked + alt forms interpret.
       if (!pal_block) return OP_NONE;
       const uint32_t f = (ins >> 12) & 0xf;
       if (f == 0) return OP_HW_LDL;
@@ -289,6 +290,10 @@ SafeOp classify(uint32_t ins, bool pal_block)
       if (f == 5) {             // Ra==31: nothing to log/replay -> interpret
         if (((ins >> 21) & 0x1f) == 31) return OP_NONE;
         return OP_HW_LDQ_VPTE;
+      }
+      if (f == 10) {            // func 0xa (HRM TYPE 1012): longword virtual read + WrChk -- jit_read_wchk
+        if (((ins >> 21) & 0x1f) == 31) return OP_NONE;   // Ra==31: probe-only, interpret for the fault
+        return OP_HW_LDL_WCHK;
       }
       return OP_NONE;
     }
@@ -600,7 +605,7 @@ static uint32_t regprof_mask(const uint32_t* w, uint32_t n)
 }
 #endif
 
-void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper, void* hw_ld_helper, void* hw_mtpr_helper, void* hw_st_helper, void* indirect_helper, void* read_locked_helper, void* stc_helper, void* misc_helper, void* read_vpte_helper, void* itof_helper, void* ftoi_helper, void* fltl_helper, void* fp_read_helper, void* fp_write_helper, void* fltv_helper)
+void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_size, void* read_helper, void* write_helper, void* opcdec_helper, void* hw_mfpr_helper, void* hw_ld_helper, void* hw_mtpr_helper, void* hw_st_helper, void* indirect_helper, void* read_locked_helper, void* stc_helper, void* misc_helper, void* read_vpte_helper, void* read_wchk_helper, void* itof_helper, void* ftoi_helper, void* fltl_helper, void* fp_read_helper, void* fp_write_helper, void* fltv_helper)
 {
   using namespace asmjit;
   // Reclaim must self-trigger here, NOT only in flush(): flush() runs when the guest executes
@@ -1059,14 +1064,14 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     // HW_LD physical (PALmode func 0/1): Ra = phys[Rb + disp12], no translation. jit_read_phys
     // does the aligned DRAM read (or replays in verify, bails on MMIO so the interpreter does the
     // ordered device read). disp is 12-bit here, not the 16-bit memory-format displacement.
-    if (op == OP_HW_LDL || op == OP_HW_LDQ || op == OP_HW_LDQ_VPTE) {
+    if (op == OP_HW_LDL || op == OP_HW_LDQ || op == OP_HW_LDQ_VPTE || op == OP_HW_LDL_WCHK) {
       if (ra == 31) continue;                                  // R31 dest discards the read
       const int disp = (int) ((int32_t) (ins << 20) >> 20);    // sign-extend 12-bit displacement
-      const int size_bits = (op == OP_HW_LDL) ? 32 : 64;
+      const int size_bits = (op == OP_HW_LDL || op == OP_HW_LDL_WCHK) ? 32 : 64;
       if (rb == 31)  a.mov(x86::rdx, imm(disp));               // address (phys, or virtual for VPTE) -> RDX
       else        {  mov_from_reg(x86::rdx, rb); if (disp) a.add(x86::rdx, imm(disp)); }
       // func 5 -> jit_read_vpte (kernel-checked virtual read); else jit_read_phys
-      emit_call(op == OP_HW_LDQ_VPTE ? read_vpte_helper : hw_ld_helper,
+      emit_call(op == OP_HW_LDQ_VPTE ? read_vpte_helper : op == OP_HW_LDL_WCHK ? read_wchk_helper : hw_ld_helper,
                 { {JA_CPU, 0}, {JA_VA, 0}, {JA_I32, (uint64_t) size_bits}, {JA_OUT, 0} });
       Label ok = a.new_label();
       a.test(x86::eax, x86::eax);
@@ -1079,7 +1084,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
       // HW_LDL SIGN-extends the longword to canonical form (QEMU gen_hw_ld uses MO_LESL; the EV68CB
       // HRM is silent but the Alpha longword-canonical rule applies, same as LDL). NOTE: the interp's
       // DO_HW_LDL zero-extends -- that is the bug, fixed in cpu_pal.h to match this.
-      if (op == OP_HW_LDL) a.movsxd(x86::rax, x86::dword_ptr(x86::rsp, 32));
+      if (op == OP_HW_LDL || op == OP_HW_LDL_WCHK) a.movsxd(x86::rax, x86::dword_ptr(x86::rsp, 32));
       else                 a.mov(x86::rax, x86::qword_ptr(x86::rsp, 32));   // HW_LDQ / VPTE: full quad
       mov_to_reg(ra, x86::rax);
       continue;

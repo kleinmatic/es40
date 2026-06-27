@@ -509,6 +509,7 @@ private:
   static int jit_read_phys(CAlphaCPU* cpu, u64 phys, int size_bits, u64* out);  // HW_LD physical: no translation
   static int jit_read_locked(CAlphaCPU* cpu, u64 va, int size_bits, u64* out);  // LDx_L: load + establish LL/SC lock
   static int jit_read_vpte(CAlphaCPU* cpu, u64 va, int size_bits, u64* out);    // HW_LD VPTE: kernel-checked virtual read
+  static int jit_read_wchk(CAlphaCPU* cpu, u64 va, int size_bits, u64* out);    // HW_LD func 0xa: longword virtual + WrChk
   static int jit_write(CAlphaCPU* cpu, u64 va, int size_bits, u64 value);
   static int jit_write_phys(CAlphaCPU* cpu, u64 phys, int size_bits, u64 value);  // HW_ST physical: no translation
   static int jit_fp_read(CAlphaCPU* cpu, u64 va, u32 fa, u32 descr);   // LDS/LDT: f[fa] = convert(MEM[va])
