@@ -687,8 +687,12 @@ static uint32_t regprof_mask(const uint32_t* w, uint32_t n)
 }
 #endif
 
+// The 3 guest GPRs kept live in the callee-saved pins r12/r13/r15. compile_block uses the global hot
+// set (RA/a0/PV); compile_trace can override with the trace's own hot regs (the M2 regalloc spike).
+static const int kGlobalPins[3] = { 26, 16, 27 };
+
 void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const HelperSet& hs,
-    bool pal_block, JitBlock* b, uint32_t ins, uint32_t i)
+    bool pal_block, JitBlock* b, uint32_t ins, uint32_t i, const int* pins)
 {
     using namespace asmjit;
     x86::Assembler& a = *(x86::Assembler*)a_ptr;
@@ -711,11 +715,11 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
         a.mov(x86::r10, imm(pc_val));
         a.mov(x86::qword_ptr(x86::rbp, m_off.state_pc), x86::r10);
         };
-    auto pin_id = [&](int r) -> int {
-        switch (r) {
-        case 26: return (int)x86::r12.id(); case 16: return (int)x86::r13.id();
-        case 27: return (int)x86::r15.id(); default: return -1;
-        }
+    auto pin_id = [&](int r) -> int {        // pins[0..2] -> r12/r13/r15 (trace-local set for compile_trace)
+        if (r == pins[0]) return (int)x86::r12.id();
+        if (r == pins[1]) return (int)x86::r13.id();
+        if (r == pins[2]) return (int)x86::r15.id();
+        return -1;
         };
 
     int ra = (ins >> 21) & 0x1F;
@@ -1971,7 +1975,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
                        fltl_helper, fp_read_helper, fp_write_helper, fltv_helper };
 
   for (uint32_t i = 0; i < plen; ++i)
-      emit_op(&a, gpa, &done, hs, pal_block, b, words[i], i);
+      emit_op(&a, gpa, &done, hs, pal_block, b, words[i], i, kGlobalPins);
 
   // Epilogue. Count this block's instructions, then chain into the next block (staying
   // in native code) or return to the dispatcher.
@@ -2158,7 +2162,7 @@ void CJitEngine::compile_trace(TraceFragment* t, JitBlock** blocks, uint32_t n_b
     a.mov(x86::qword_ptr(x86::rbp, m_off.state_pc), x86::r10);
 
     for (uint32_t i = 0; i < plen; ++i)
-      emit_op(&a, gpa, &done, hs, pal_block, b, words[i], i);
+      emit_op(&a, gpa, &done, hs, pal_block, b, words[i], i, kGlobalPins);
 
     a.add(x86::r14d, imm(plen));   // count this block
     a.mov(x86::eax, x86::r14d);    // EAX = instrs completed so far (preset for `done` -- a side-exit or return)
