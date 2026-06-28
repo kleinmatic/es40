@@ -900,8 +900,19 @@ void CAlphaCPU::jit_run(int budget)
 					(void*)&CAlphaCPU::jit_fltl,
 					(void*)&CAlphaCPU::jit_fp_read,     (void*)&CAlphaCPU::jit_fp_write,
 					(void*)&CAlphaCPU::jit_fltv };
-				CJitEngine::JitBlock* blist[1] = { b };   // M1.3a: 1-block list (2-block fusion comes at M1.3b)
-				m_jit->compile_trace(m_jit->trace_slot(start_virt), blist, 1, (const uint8_t*)dram_ptr, dram_size, hs);
+				CJitEngine::JitBlock* blist[2] = { b, nullptr };
+				u32 nb = 1;
+				// block FUSION! the head's STATIC branch target (its taken successor) when that's a live compiled
+				// block. works under verify too (b->link is only set by production chaining). Computed jumps /
+				// fall-throughs stay 1-block; a self-target is left to the block self-loop fast path.
+				{ const u32* aw = (const u32*)((const u8*)dram_ptr + b->phys);
+				  const u32 lop = aw[b->prefix_len - 1]; const u32 lopc = lop >> 26;
+				  if (lopc == 0x30 || lopc == 0x34 || (lopc >= 0x38 && lopc <= 0x3f)) {
+				    const int64_t disp = (int64_t)((uint64_t)(lop & 0x1FFFFF) << 43) >> 43;
+				    const u64 spc = (((b->tag & ~U64(1)) + 4 * (u64)(b->prefix_len - 1)) + 4 + (u64)(disp * 4)) | (b->tag & 1);
+				    CJitEngine::JitBlock* succ = m_jit->lookup(spc, start_asn);
+				    if (succ && succ != b && succ->code && succ->prefix_len > 0) { blist[1] = succ; nb = 2; } } }
+				m_jit->compile_trace(m_jit->trace_slot(start_virt), blist, nb, (const uint8_t*)dram_ptr, dram_size, hs);
 			}
 #ifdef JIT_VERIFY
 			// Interpret the prefix (authoritative), recording each loaded value so the
@@ -926,8 +937,15 @@ void CAlphaCPU::jit_run(int budget)
 			u64 vpc = start_virt;
 			u32 cur_len = b->prefix_len;   // current interpreted block's length + start tag; step 3
 			u64 cur_tag = b->tag;          // advances these per segment across a fused trace
+				u32 n_interp = 0;              // ops the interp ran over the trace's fused span (vs t->code's done)
 			bool clean = true;
-			for (u32 k = 0; k < cur_len; ++k)
+			CJitEngine::TraceFragment* vtr = m_jit->traces_enabled() ? m_jit->trace_lookup(start_virt, start_asn) : nullptr;
+				if (vtr && !m_jit->trace_ok(vtr, start_phys, (const uint8_t*)dram_ptr)) vtr = nullptr;   // stale -> verify as a plain block
+				const u32 nseg = vtr ? vtr->n_segs : 1;   // interp the trace's full fused span; else just block b
+				for (u32 seg = 0; seg < nseg && clean; ++seg) {
+				if (vtr) { cur_len = vtr->segs[seg].n_instr; cur_tag = vtr->segs[seg].guest_pc;
+				           vw = (const u32*)((const u8*)dram_ptr + vtr->segs[seg].phys_pc); vpc = cur_tag; }
+				for (u32 k = 0; k < cur_len; ++k)
 			{
 				// Compute the load's effective address from the live registers BEFORE
 				// executing it (Rb may be the load's own dest), to compare against the JIT.
@@ -1042,7 +1060,11 @@ void CAlphaCPU::jit_run(int budget)
 					sn++;
 				}
 			}
-			if (clean)
+			if (!clean) break;          // fault/divergence in this segment -> stop (compare skipped)
+				n_interp += cur_len;        // this segment ran fully
+				if (vtr && seg + 1 < nseg && state.pc != vtr->segs[seg + 1].guest_pc) break;   // path left the fused trace -> side-exit
+				}   // end per-segment interp loop
+				if (clean)
 			{
 				// HW_MTPR verify: a compiled block writes IPR fields directly in LIVE state (its GPR
 				// writes go to jr scratch). Snapshot the writable IPR set after the interp pass
@@ -1099,7 +1121,7 @@ void CAlphaCPU::jit_run(int budget)
 				m_jit_slog_i = 0;
 				const u32 done = b->code(this, jr);   // also writes state.pc (the JIT's next PC)
 				m_jit_vreplay = false;
-				if (done == b->prefix_len)
+				if (!vtr && done == b->prefix_len)
 				{
 					if (state.pc != interp_pc) {
 						// Dump the JIT's source (DRAM at b->phys, vw[]) vs the icache (what the
@@ -1151,12 +1173,12 @@ void CAlphaCPU::jit_run(int budget)
 						m_jit_vreplay = true; m_jit_vlog_i = 0; m_jit_slog_i = 0;
 						const u32 done_t = ((CJitEngine::JitFn)tr->code)(this, jr_t);
 						m_jit_vreplay = false;
-						if (done_t == tr->n_instr) {
+						if (done_t == n_interp) {
 							if (state.pc != interp_pc)
 								printf("[JIT][VERIFY] TRACE PC MISMATCH at %016llx: interp=%016llx trace=%016llx (n=%u)\n",
 									(unsigned long long) start_virt, (unsigned long long) interp_pc,
-									(unsigned long long) state.pc, tr->n_instr);
-							m_jit->verify_compare(start_virt, state.r, jr_t, vw, tr->n_instr);
+									(unsigned long long) state.pc, n_interp);
+							m_jit->verify_compare(start_virt, state.r, jr_t, vw, n_interp);
 						}
 					}
 				}
