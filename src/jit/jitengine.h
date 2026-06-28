@@ -195,9 +195,9 @@ public:
   void emit_op(void* a, const uint8_t* gpa, void* done, const HelperSet& hs,
                bool pal_block, JitBlock* b, uint32_t ins, uint32_t i);
 
-  // compile a single-block trace into slot t (reuses emit_op; the only difference from a block is
-  // the exit, return to the dispatcher, no chaining). Fusion/guards/optimization to come
-  void compile_trace(TraceFragment* t, JitBlock* b, const uint8_t* dram, uint64_t dram_size, const HelperSet& hs);
+  // compile an N-block trace into slot t (reuses emit_op per block; blocks fused with a guard -> side-exit
+  // between them). n_blocks==1 is the single-block case; the exit returns to the dispatcher.
+  void compile_trace(TraceFragment* t, JitBlock** blocks, uint32_t n_blocks, const uint8_t* dram, uint64_t dram_size, const HelperSet& hs);
 
   void flush_non_global();   // flush only !asm_global blocks (the ASM-bit-clear / ASN icache flush)
   void reclaim_code();       // free ALL compiled code once past kReclaimBytes (cold-path only)

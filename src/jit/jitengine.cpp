@@ -2108,21 +2108,22 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
 #endif
 }
 
-// compile a SINGLE-block trace. Reuses the shared emit_op for the per-op codegen (so the body is
-// the exact one the block path already verifies); the ONLY difference from compile_block is the EXIT,
-// a trace returns to the dispatcher instead of chaining. No fusion, guards, or optimization yet.
-// Fills the caller-provided slot t (code + source segment + coherence epoch).
-void CJitEngine::compile_trace(TraceFragment* t, JitBlock* b, const uint8_t* dram, uint64_t dram_size,
-                               const HelperSet& hs)
+// Compile an N-block trace. Reuses the shared emit_op for each block's per-op codegen (so the body
+// is the exact one the block path already verifies). Blocks are fused with a GUARD between them: after a
+// block's terminator (which left R10 = its next PC), check R10 == the next fused block's tag; on a hit fall
+// through in-trace, on a miss SIDE-EXIT to the dispatcher at the real next PC. n_blocks==1 = the single-
+// block trace. Fills the caller-provided slot t (code + per-segment source descriptors + coherence epoch).
+void CJitEngine::compile_trace(TraceFragment* t, JitBlock** blocks, uint32_t n_blocks,
+                               const uint8_t* dram, uint64_t dram_size, const HelperSet& hs)
 {
   using namespace asmjit;
-  const uint64_t phys = b->phys;
-  const uint32_t plen = b->prefix_len;   // the COMPILED prefix length (compile_block's loop bound), NOT
-                                         // n_instr -- ops past the prefix never passed the safe-to-compile
-                                         // scan, and emitting them runs code PAST the terminator.
-  if (plen == 0 || phys + (uint64_t) plen * 4 > dram_size) return;
-  const uint32_t* words = (const uint32_t*) (dram + phys);
-  const bool pal_block = (b->tag & 1) != 0;
+  if (n_blocks == 0 || n_blocks > kMaxTraceSegs) return;
+  // Validate every segment up front: a compiled prefix that fits in DRAM. (prefix_len, NOT n_instr --
+  // ops past the prefix never passed the safe-to-compile scan; emitting them runs code PAST the terminator.)
+  for (uint32_t bi = 0; bi < n_blocks; ++bi) {
+    const JitBlock* b = blocks[bi];
+    if (b->prefix_len == 0 || b->phys + (uint64_t) b->prefix_len * 4 > dram_size) return;
+  }
 
   CodeHolder code;
   if (code.init(((JitRuntime*) m_rt)->environment()) != Error::kOk) return;
@@ -2141,23 +2142,35 @@ void CJitEngine::compile_trace(TraceFragment* t, JitBlock* b, const uint8_t* dra
   a.mov(x86::r13, x86::qword_ptr(x86::rbx, 16 * 8));   // R16 (a0) pin
   a.mov(x86::r15, x86::qword_ptr(x86::rbx, 27 * 8));   // R27 (PV) pin
 
-  Label done = a.new_label();
+  Label done = a.new_label();   // shared side-exit/return: EAX preset to the instr count, state.pc live
 
-  // Default state.pc = the next sequential PC (the fall-through exit). emit_op's branch/jump
-  // terminator overwrites it with the computed target, and a mid-op fault bail writes the fault PC;
-  // a pure ALU/fall-through block leaves this default. compile_block writes this only in its
-  // fall-through epilogue case, a trace has no chaining epilogue, and since no compiled op READS
-  // state.pc mid-block, defaulting before the loop is equivalent and skips re-deriving the
-  // terminator type. Omitting it killed things: fall-through traces kept a stale PC, invisible to 
-  // verify because the trace-run hook is gated off there.
-  a.mov(x86::r10, imm(b->tag + 4 * (uint64_t) plen));
-  a.mov(x86::qword_ptr(x86::rbp, m_off.state_pc), x86::r10);
+  for (uint32_t bi = 0; bi < n_blocks; ++bi) {
+    JitBlock* b = blocks[bi];
+    const uint32_t plen = b->prefix_len;
+    const uint32_t* words = (const uint32_t*) (dram + b->phys);
+    const bool pal_block = (b->tag & 1) != 0;
 
-  for (uint32_t i = 0; i < plen; ++i)
-    emit_op(&a, gpa, &done, hs, pal_block, b, words[i], i);
+    // Default R10 + state.pc = this block's sequential next (the fall-through exit). emit_op's branch/jump
+    // terminator overwrites both with its target; a fault bail writes the fault PC. For an intermediate
+    // block this also makes the guard below see R10 == the sequential successor when it falls through.
+    // (note: no compiled op currently READS state.pc mid-block, so default-before-emit is equivalent.)
+    a.mov(x86::r10, imm(b->tag + 4 * (uint64_t) plen));
+    a.mov(x86::qword_ptr(x86::rbp, m_off.state_pc), x86::r10);
 
-  a.add(x86::r14d, imm(plen));   // count the block (a branch/jump/fall-through all left state.pc set)
-  a.mov(x86::eax, x86::r14d);    // EAX = instructions completed (a fault bail jumps to `done` with EAX set)
+    for (uint32_t i = 0; i < plen; ++i)
+      emit_op(&a, gpa, &done, hs, pal_block, b, words[i], i);
+
+    a.add(x86::r14d, imm(plen));   // count this block
+    a.mov(x86::eax, x86::r14d);    // EAX = instrs completed so far (preset for `done` -- a side-exit or return)
+
+    if (bi + 1 < n_blocks) {
+      // Guard: did this block actually flow to the next fused block? R10 = its next PC; a mismatch means
+      // the path diverged from what we fused -> side-exit to the dispatcher at the real next PC (state.pc).
+      a.mov(x86::rcx, imm(blocks[bi + 1]->tag));   // 64-bit tag may exceed imm32; rcx scratch (not EAX)
+      a.cmp(x86::r10, x86::rcx);
+      a.jne(done);
+    }
+  }
   a.bind(done);
   a.mov(x86::qword_ptr(x86::rbx, 26 * 8), x86::r12);   // sync pins back to regs[] before returning
   a.mov(x86::qword_ptr(x86::rbx, 16 * 8), x86::r13);
@@ -2170,17 +2183,23 @@ void CJitEngine::compile_trace(TraceFragment* t, JitBlock* b, const uint8_t* dra
   const size_t csz = code.code_size();
   JitFn fn = nullptr;
   if (((JitRuntime*) m_rt)->add(&fn, &code) != Error::kOk) return;
+  uint32_t total = 0;
+  for (uint32_t bi = 0; bi < n_blocks; ++bi) {
+    JitBlock* b = blocks[bi];
+    t->segs[bi] = { b->tag, b->phys, b->prefix_len, b->asm_global, b->asn,
+                    src_hash(dram + b->phys, b->prefix_len) };
+    total += b->prefix_len;
+  }
   t->code       = fn;
-  t->head_tag   = b->tag;
-  t->asn        = b->asn;
-  t->asm_global = b->asm_global;
+  t->head_tag   = blocks[0]->tag;
+  t->asn        = blocks[0]->asn;
+  t->asm_global = blocks[0]->asm_global;
   t->valid      = true;
   t->vgen       = m_itb_gen + m_flush_gen;
   t->flush_gen  = m_flush_gen;
-  t->n_blocks   = 1;
-  t->n_instr    = plen;
-  t->n_segs     = 1;
-  t->segs[0]    = { b->tag, b->phys, plen, b->asm_global, b->asn, src_hash(dram + phys, plen) };
+  t->n_blocks   = n_blocks;
+  t->n_instr    = total;
+  t->n_segs     = n_blocks;
   t->n_exits    = 0;
   m_code_bytes += csz;
 #ifdef JIT_STATS

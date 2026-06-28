@@ -900,7 +900,8 @@ void CAlphaCPU::jit_run(int budget)
 					(void*)&CAlphaCPU::jit_fltl,
 					(void*)&CAlphaCPU::jit_fp_read,     (void*)&CAlphaCPU::jit_fp_write,
 					(void*)&CAlphaCPU::jit_fltv };
-				m_jit->compile_trace(m_jit->trace_slot(start_virt), b, (const uint8_t*)dram_ptr, dram_size, hs);
+				CJitEngine::JitBlock* blist[1] = { b };   // M1.3a: 1-block list (2-block fusion comes at M1.3b)
+				m_jit->compile_trace(m_jit->trace_slot(start_virt), blist, 1, (const uint8_t*)dram_ptr, dram_size, hs);
 			}
 #ifdef JIT_VERIFY
 			// Interpret the prefix (authoritative), recording each loaded value so the
