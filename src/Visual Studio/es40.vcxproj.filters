@@ -446,6 +446,9 @@
     <ClInclude Include="..\diag_rpcc.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\DiskFileBinCue.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\README.md">

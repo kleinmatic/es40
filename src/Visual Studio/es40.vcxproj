@@ -2284,6 +2284,7 @@
     <ClInclude Include="..\DiskController.h" />
     <ClInclude Include="..\DiskDevice.h" />
     <ClInclude Include="..\DiskFile.h" />
+    <ClInclude Include="..\DiskFileBinCue.h" />
     <ClInclude Include="..\DiskRam.h" />
     <ClInclude Include="..\DMA.h" />
     <ClInclude Include="..\DPR.h" />
