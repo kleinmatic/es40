@@ -79,6 +79,7 @@ public:
                           // -- the single chain guard (see emit_chain / jit_indirect).
     uint64_t flush_gen;   // icache-flush generation at which the code bytes were last hash-validated;
                           // stale => lookup misses and revalidate_flushed() re-hashes (lazy IC_FLUSH)
+    uint32_t hot;         // dispatches since record; at the promote threshold -> form a trace
 #ifdef JIT_REGPROF
     uint64_t rp_hits;     // REGPROF: block executions since record (body-entry inc -- counts chained runs)
     uint32_t rp_mask;     // REGPROF: Alpha GPRs touched by this block (bit r); compile-time, exec-weighted at report
@@ -166,6 +167,13 @@ public:
   inline bool traces_enabled() const { return m_traces_enabled; }
   inline void set_traces_enabled(bool e) { m_traces_enabled = e; }
 
+  // the slot a head PC maps to (formation fills it). Unlike trace_lookup, returns the slot
+  // unconditionally so  the caller decides whether to (re)form into it.
+  inline TraceFragment* trace_slot(uint64_t head_pc) { return &m_traces[trace_index_of(head_pc)]; }
+#ifdef JIT_STATS
+  inline void trace_entered() { m_trace_entered++; }
+#endif
+
   inline TraceFragment* trace_lookup(uint64_t virt_pc, uint32_t asn)
   {
     TraceFragment& t = m_traces[trace_index_of(virt_pc)];
@@ -186,6 +194,10 @@ public:
   // Per-op codegen, shared by compile_block and compile_trace 
   void emit_op(void* a, const uint8_t* gpa, void* done, const HelperSet& hs,
                bool pal_block, JitBlock* b, uint32_t ins, uint32_t i);
+
+  // compile a single-block trace into slot t (reuses emit_op; the only difference from a block is
+  // the exit, return to the dispatcher, no chaining). Fusion/guards/optimization to come
+  void compile_trace(TraceFragment* t, JitBlock* b, const uint8_t* dram, uint64_t dram_size, const HelperSet& hs);
 
   void flush_non_global();   // flush only !asm_global blocks (the ASM-bit-clear / ASN icache flush)
   void reclaim_code();       // free ALL compiled code once past kReclaimBytes (cold-path only)

@@ -822,19 +822,43 @@ void CAlphaCPU::jit_run(int budget)
 				have_phys = false;
 		}
 
-		// Trace tier (scaffolding): gated lookup BEFORE the block cache. m_traces_enabled is
-		// false until run_trace is live, so this whole path is skipped, bit-identical to the 
-		// block-only.
-		// Next step fills in trace execution (run the fragment, which side-exits back here with 
-		// state.pc set, then `continue`); the block cache stays the universal fallback.
-		if (have_phys && m_jit->traces_enabled())
+		// Trace tier: gated lookup BEFORE the block cache. In non-debug release a hot trace runs
+		// straight through and side-exits back here with state.pc set, then `continue`; the block
+		// cache stays the universal fallback. Under JIT_VERIFY the production run is gated OFF,
+		// traces still FORM (below), but they're exercised + compared inside the block verify (next
+		// stage) rather than driving execution unchecked.
+#ifndef JIT_VERIFY
+		// Same run-gates as the block path below: a compiled trace has no per-instruction interrupt
+		// poll, so DON'T enter it while an interrupt/timer is pending (the interpreter must service it,
+		// or the CPU livelocks -> OS sanity-timer bugcheck), nor a PALmode trace without SDE, nor one
+		// that would overrun the budget.
+		if (have_phys && m_jit->traces_enabled() && !state.check_int && !state.check_timers)
 		{
 			CJitEngine::TraceFragment* t = m_jit->trace_lookup(start_virt, start_asn);
-			if (t && m_jit->trace_ok(t, start_phys, (const uint8_t*)dram_ptr))
+			if (t && (int) t->n_instr <= budget && (!(t->head_tag & 1) || state.sde)
+			    && m_jit->trace_ok(t, start_phys, (const uint8_t*)dram_ptr))
 			{
-				// run_trace(t); continue;   (no traces are formed yet -> unreachable)
+				m_jit_budget = budget;   // ceiling for the trace (its loads/bails honor it like a block)
+#ifdef JIT_STATS
+				const uint64_t _trace_t0 = jit_rdtsc();
+#endif
+				const u32 done = ((CJitEngine::JitFn) t->code)(this, &state.r[0]);
+#ifdef JIT_STATS
+				const uint64_t _trace_tsc = jit_rdtsc() - _trace_t0;
+#endif
+				state.r[31] = 0;
+				break_seq_icache();      // the trace wrote state.pc natively; drop the stale cursor
+				state.instruction_count += done;
+				cc_large += (u64) done * cc_per_instruction;
+				budget -= done;
+#ifdef JIT_STATS
+				cc_last_sync += std::chrono::nanoseconds(m_jit->note_exec(done, 0, _trace_tsc, 0));
+				m_jit->trace_entered();
+#endif
+				if (done > 0) continue;  // progress: re-dispatch at the trace's exit PC
 			}
 		}
+#endif
 
 		// Hot path: virtual+ASN lookup, phys-validated (skipped on a translation miss).
 		CJitEngine::JitBlock* b = have_phys ? m_jit->lookup(start_virt, start_asn) : nullptr;
@@ -860,6 +884,24 @@ void CAlphaCPU::jit_run(int budget)
 			&& (!(b->tag & 1) || state.sde))   // PALmode block: its shadow-register remap assumes SDE
 		{
 			b->vgen = m_jit->vgen();   // phys validated + lookup proved flush-fresh: refresh the chain epoch
+			// after a block has dispatched 8x, promote it to a single-block trace (a
+			// future trace head). Dispatch-counted for now -- it undercounts chained loops, but they
+			// still surface here when a chain breaks
+			if (m_jit->traces_enabled() && ++b->hot == 8 && !m_jit->trace_lookup(start_virt, start_asn))
+			{
+				const CJitEngine::HelperSet hs = {
+					(void*)&CAlphaCPU::jit_read,        (void*)&CAlphaCPU::jit_write,
+					(void*)&CAlphaCPU::jit_opcdec,      (void*)&CAlphaCPU::jit_hw_mfpr,
+					(void*)&CAlphaCPU::jit_read_phys,   (void*)&CAlphaCPU::jit_hw_mtpr,
+					(void*)&CAlphaCPU::jit_write_phys,  (void*)&CAlphaCPU::jit_indirect,
+					(void*)&CAlphaCPU::jit_read_locked, (void*)&CAlphaCPU::jit_stc,
+					(void*)&CAlphaCPU::jit_misc,        (void*)&CAlphaCPU::jit_read_vpte, (void*)&CAlphaCPU::jit_read_wchk,
+					(void*)&CAlphaCPU::jit_itof,        (void*)&CAlphaCPU::jit_ftoi,
+					(void*)&CAlphaCPU::jit_fltl,
+					(void*)&CAlphaCPU::jit_fp_read,     (void*)&CAlphaCPU::jit_fp_write,
+					(void*)&CAlphaCPU::jit_fltv };
+				m_jit->compile_trace(m_jit->trace_slot(start_virt), b, (const uint8_t*)dram_ptr, dram_size, hs);
+			}
 #ifdef JIT_VERIFY
 			// Interpret the prefix (authoritative), recording each loaded value so the
 			// compiled pass can replay it instead of re-reading memory. Skip the compare
@@ -1086,6 +1128,34 @@ void CAlphaCPU::jit_run(int budget)
 							(unsigned long long) start_virt, fi,
 							(unsigned long long) f_interp[fi], (unsigned long long) state.f[fi]);
 					cc_last_sync += std::chrono::nanoseconds(m_jit->verify_compare(start_virt, state.r, jr, vw, b->prefix_len));   // don't bill the progress-print stall to RPCC
+				}
+				// verify extension: the production trace-run hook is gated off under JIT_VERIFY, so
+				// exercise the trace HERE; re-restore pre-interp state, run t->code on a 2nd scratch
+				// (replaying the same logged loads), then compare to the authoritative interp. This makes
+				// the trace's own state.pc write + frame visible to the differential harness.
+				if (m_jit->traces_enabled()) {
+					CJitEngine::TraceFragment* tr = m_jit->trace_lookup(start_virt, start_asn);
+					if (tr && m_jit->trace_ok(tr, start_phys, (const uint8_t*)dram_ptr)) {
+						memcpy(state.f, f_pre, sizeof(f_pre));
+						state.sde = ictl_sde_pre; state.hwe = ictl_hwe_pre;
+						state.i_ctl_spe = ictl_spe_pre; state.i_ctl_va_mode = ictl_vam_pre;
+						state.i_ctl_vptb = ictl_vptb_pre; state.i_ctl_other = ictl_other_pre;
+						state.cm = cm_pre; state.sir = sir_pre;
+						state.aster = aster_pre; state.astrr = astrr_pre;
+						state.fpen = fpen_pre; state.ppcen = ppcen_pre;
+						u64 jr_t[64];
+						memcpy(jr_t, snap, sizeof(jr_t));
+						m_jit_vreplay = true; m_jit_vlog_i = 0; m_jit_slog_i = 0;
+						const u32 done_t = ((CJitEngine::JitFn) tr->code)(this, jr_t);
+						m_jit_vreplay = false;
+						if (done_t == tr->n_instr) {
+							if (state.pc != interp_pc)
+								printf("[JIT][VERIFY] TRACE PC MISMATCH at %016llx: interp=%016llx trace=%016llx (n=%u)\n",
+									(unsigned long long) start_virt, (unsigned long long) interp_pc,
+									(unsigned long long) state.pc, tr->n_instr);
+							m_jit->verify_compare(start_virt, state.r, jr_t, vw, tr->n_instr);
+						}
+					}
 				}
 				state.pc = interp_pc;   // restore; the block's PC write was only for the check
 				put_iprs(ipr_interp);   // roll back the compiled pass's live IPR writes (verify-only)

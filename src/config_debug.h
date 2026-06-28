@@ -188,3 +188,8 @@
 // validate every emitted instruction, and trap silent emit failures via an error handler.
 // VERY NOISY, and validation adds runtime cost (ES40_JIT builds only).
 //#define JIT_DISASM
+
+// Define to enable the JIT trace tier. At this time this is a net perf LOSS, 1-block traces 
+// preempt block chaining so leave OFF unless testing. The tier stays compiled regardless; 
+// this just flips it on. (ES40_JIT builds only.)
+//#define JIT_TRACES

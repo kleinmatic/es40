@@ -388,7 +388,14 @@ static const char* opcode_name(unsigned op);
 CJitEngine::CJitEngine(int cpu_id) : m_cpu_id(cpu_id), m_recorded(0), m_code_bytes(0), m_rt(nullptr)
 {
   memset(m_blocks, 0, sizeof(m_blocks));    // flush() is lazy (gen bump) -- zero the slots here
-  memset(m_traces, 0, sizeof(m_traces));    // trace tier: empty for now (m_traces_enabled stays false)
+  memset(m_traces, 0, sizeof(m_traces));    // trace tier: empty until formation fills slots
+  // Trace tier kill-switch (config_debug.h JIT_TRACES). OFF by default, 1-block traces preempt block
+  // chaining = a net loss; re-enable when fusion closes loops in-trace.
+#ifdef JIT_TRACES
+  m_traces_enabled = true;
+#else
+  m_traces_enabled = false;
+#endif
   m_rt = new asmjit::JitRuntime();
 #ifdef JIT_VERIFY
   m_v_exec = m_v_fail = 0;
@@ -487,6 +494,7 @@ CJitEngine::JitBlock* CJitEngine::record(uint64_t virt_pc, uint64_t phys_pc, uin
   b.link = nullptr;       // no cached successor yet
   b.prefix_len = 0;
   b.compiled = false;
+  b.hot = 0;              // fresh block: restart the trace-promotion counter 
 #ifdef JIT_REGPROF
   b.rp_hits = 0;          // fresh block: restart the exec counter (resurrect/revalidate keep theirs)
 #endif
@@ -530,6 +538,12 @@ bool CJitEngine::trace_ok(TraceFragment* t, uint64_t head_live_phys, const uint8
 {
   if (t->n_segs == 0 || t->segs[0].phys_pc != head_live_phys)
     return false;                                     // head remap / ASN recycle
+  // A 1-block trace mirrors its head block's compiled prefix, whose length can change with NO source-byte
+  // or epoch change: a fault-truncated cold record shrinks prefix_len (n_instr oscillates), a later clean
+  // record regrows it invisibly to the hash below. If the live head block compiled a different length,
+  // the trace is stale; drop it so the dispatcher re-forms a consistent one.
+  { const JitBlock& hb = m_blocks[index_of(t->head_tag)];
+    if (hb.valid && hb.tag == t->head_tag && hb.prefix_len != t->segs[0].n_instr) return false; }
   if (t->vgen == m_itb_gen + m_flush_gen)
     return true;                                      // epoch fresh: nothing changed since build
   for (uint32_t i = 0; i < t->n_segs; ++i) {
@@ -594,6 +608,9 @@ void CJitEngine::reclaim_code()
     m_blocks[i].jit_body = nullptr;
     m_blocks[i].compiled = false;
   }
+  // Traces hold JitFns into the runtime we just deleted -- drop them too, or a post-reclaim trace
+  // dispatch jumps through a freed pointer. trace_lookup keys on valid, so clearing it is enough.
+  for (int i = 0; i < kTraceEntries; ++i) m_traces[i].valid = false;
 }
 
 void CJitEngine::flush()
@@ -2091,6 +2108,86 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
 #endif
 }
 
+// compile a SINGLE-block trace. Reuses the shared emit_op for the per-op codegen (so the body is
+// the exact one the block path already verifies); the ONLY difference from compile_block is the EXIT,
+// a trace returns to the dispatcher instead of chaining. No fusion, guards, or optimization yet.
+// Fills the caller-provided slot t (code + source segment + coherence epoch).
+void CJitEngine::compile_trace(TraceFragment* t, JitBlock* b, const uint8_t* dram, uint64_t dram_size,
+                               const HelperSet& hs)
+{
+  using namespace asmjit;
+  const uint64_t phys = b->phys;
+  const uint32_t plen = b->prefix_len;   // the COMPILED prefix length (compile_block's loop bound), NOT
+                                         // n_instr -- ops past the prefix never passed the safe-to-compile
+                                         // scan, and emitting them runs code PAST the terminator.
+  if (plen == 0 || phys + (uint64_t) plen * 4 > dram_size) return;
+  const uint32_t* words = (const uint32_t*) (dram + phys);
+  const bool pal_block = (b->tag & 1) != 0;
+
+  CodeHolder code;
+  if (code.init(((JitRuntime*) m_rt)->environment()) != Error::kOk) return;
+  x86::Assembler a(&code);
+  CallConv cc;
+  (void) cc.init(CallConvId::kCDecl, ((JitRuntime*) m_rt)->environment());
+  const uint8_t* gpa = cc.passed_order(RegGroup::kGp);
+
+  a.push(x86::rbx); a.push(x86::rbp); a.push(x86::r14);
+  a.push(x86::r12); a.push(x86::r13); a.push(x86::r15);
+  a.sub(x86::rsp, imm(40));
+  a.mov(x86::rbp, x86::gpq(gpa[0]));                   // cpu
+  a.mov(x86::rbx, x86::gpq(gpa[1]));                   // regs
+  a.xor_(x86::r14d, x86::r14d);
+  a.mov(x86::r12, x86::qword_ptr(x86::rbx, 26 * 8));   // R26 (RA) pin
+  a.mov(x86::r13, x86::qword_ptr(x86::rbx, 16 * 8));   // R16 (a0) pin
+  a.mov(x86::r15, x86::qword_ptr(x86::rbx, 27 * 8));   // R27 (PV) pin
+
+  Label done = a.new_label();
+
+  // Default state.pc = the next sequential PC (the fall-through exit). emit_op's branch/jump
+  // terminator overwrites it with the computed target, and a mid-op fault bail writes the fault PC;
+  // a pure ALU/fall-through block leaves this default. compile_block writes this only in its
+  // fall-through epilogue case, a trace has no chaining epilogue, and since no compiled op READS
+  // state.pc mid-block, defaulting before the loop is equivalent and skips re-deriving the
+  // terminator type. Omitting it killed things: fall-through traces kept a stale PC, invisible to 
+  // verify because the trace-run hook is gated off there.
+  a.mov(x86::r10, imm(b->tag + 4 * (uint64_t) plen));
+  a.mov(x86::qword_ptr(x86::rbp, m_off.state_pc), x86::r10);
+
+  for (uint32_t i = 0; i < plen; ++i)
+    emit_op(&a, gpa, &done, hs, pal_block, b, words[i], i);
+
+  a.add(x86::r14d, imm(plen));   // count the block (a branch/jump/fall-through all left state.pc set)
+  a.mov(x86::eax, x86::r14d);    // EAX = instructions completed (a fault bail jumps to `done` with EAX set)
+  a.bind(done);
+  a.mov(x86::qword_ptr(x86::rbx, 26 * 8), x86::r12);   // sync pins back to regs[] before returning
+  a.mov(x86::qword_ptr(x86::rbx, 16 * 8), x86::r13);
+  a.mov(x86::qword_ptr(x86::rbx, 27 * 8), x86::r15);
+  a.add(x86::rsp, imm(40));
+  a.pop(x86::r15); a.pop(x86::r13); a.pop(x86::r12);
+  a.pop(x86::r14); a.pop(x86::rbp); a.pop(x86::rbx);
+  a.ret();
+
+  const size_t csz = code.code_size();
+  JitFn fn = nullptr;
+  if (((JitRuntime*) m_rt)->add(&fn, &code) != Error::kOk) return;
+  t->code       = fn;
+  t->head_tag   = b->tag;
+  t->asn        = b->asn;
+  t->asm_global = b->asm_global;
+  t->valid      = true;
+  t->vgen       = m_itb_gen + m_flush_gen;
+  t->flush_gen  = m_flush_gen;
+  t->n_blocks   = 1;
+  t->n_instr    = plen;
+  t->n_segs     = 1;
+  t->segs[0]    = { b->tag, b->phys, plen, b->asm_global, b->asn, src_hash(dram + phys, plen) };
+  t->n_exits    = 0;
+  m_code_bytes += csz;
+#ifdef JIT_STATS
+  m_trace_formed++;
+#endif
+}
+
 #ifdef JIT_VERIFY
 uint64_t CJitEngine::verify_compare(uint64_t blk_virt, const uint64_t* interp, const uint64_t* jit,
                                     const uint32_t* words, uint32_t nwords)
@@ -2206,6 +2303,10 @@ uint64_t CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr, uin
            m_cpu_id, (unsigned long long) m_fresh_tag, (unsigned long long) m_fresh_asn,
            (unsigned long long) m_fresh_phys, (unsigned long long) m_fresh_hash,
            (unsigned long long) m_fresh_cold, (unsigned long long) fresh);
+  if (m_trace_formed || m_trace_entered)
+    printf("[JIT][STATS][CPU%d] traces: formed %llu | entered %llu | exits %llu | stale %llu (windowed)\n",
+           m_cpu_id, (unsigned long long) m_trace_formed, (unsigned long long) m_trace_entered,
+           (unsigned long long) m_trace_exits, (unsigned long long) m_trace_stale);
   len = snprintf(buf, sizeof(buf), "[JIT][STATS][CPU%d] %llu recorded, %llu compiled (avg %.1f instr) | block-breakers:",
                  m_cpu_id, (unsigned long long) m_recorded, (unsigned long long) m_stat_compiled, avgpl);
   uint64_t hist[64];
@@ -2267,6 +2368,7 @@ uint64_t CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr, uin
   m_tsc_window_start = jit_rdtsc();   // next window's split denominator starts after this report's I/O
   m_bail_link = m_jmp_attempt = m_jmp_hit = 0;
   m_fresh_cold = m_fresh_tag = m_fresh_asn = m_fresh_phys = m_fresh_hash = 0;
+  m_trace_formed = m_trace_entered = m_trace_exits = m_trace_stale = 0;
   const auto stat_end = std::chrono::steady_clock::now();
   m_stat_wall_last_ns = (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
       stat_end.time_since_epoch()).count();   // next window's throughput delta starts after this I/O
