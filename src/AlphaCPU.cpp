@@ -835,21 +835,21 @@ void CAlphaCPU::jit_run(int budget)
 		if (have_phys && m_jit->traces_enabled() && !state.check_int && !state.check_timers)
 		{
 			CJitEngine::TraceFragment* t = m_jit->trace_lookup(start_virt, start_asn);
-			if (t && (int) t->n_instr <= budget && (!(t->head_tag & 1) || state.sde)
-			    && m_jit->trace_ok(t, start_phys, (const uint8_t*)dram_ptr))
+			if (t && (int)t->n_instr <= budget && (!(t->head_tag & 1) || state.sde)
+				&& m_jit->trace_ok(t, start_phys, (const uint8_t*)dram_ptr))
 			{
 				m_jit_budget = budget;   // ceiling for the trace (its loads/bails honor it like a block)
 #ifdef JIT_STATS
 				const uint64_t _trace_t0 = jit_rdtsc();
 #endif
-				const u32 done = ((CJitEngine::JitFn) t->code)(this, &state.r[0]);
+				const u32 done = ((CJitEngine::JitFn)t->code)(this, &state.r[0]);
 #ifdef JIT_STATS
 				const uint64_t _trace_tsc = jit_rdtsc() - _trace_t0;
 #endif
 				state.r[31] = 0;
 				break_seq_icache();      // the trace wrote state.pc natively; drop the stale cursor
 				state.instruction_count += done;
-				cc_large += (u64) done * cc_per_instruction;
+				cc_large += (u64)done * cc_per_instruction;
 				budget -= done;
 #ifdef JIT_STATS
 				cc_last_sync += std::chrono::nanoseconds(m_jit->note_exec(done, 0, _trace_tsc, 0));
@@ -924,8 +924,10 @@ void CAlphaCPU::jit_run(int budget)
 			u32 vn = 0;   // loads recorded for replay
 			u32 sn = 0;   // stores recorded for the compiled-pass compare
 			u64 vpc = start_virt;
+			u32 cur_len = b->prefix_len;   // current interpreted block's length + start tag; step 3
+			u64 cur_tag = b->tag;          // advances these per segment across a fused trace
 			bool clean = true;
-			for (u32 k = 0; k < b->prefix_len; ++k)
+			for (u32 k = 0; k < cur_len; ++k)
 			{
 				// Compute the load's effective address from the live registers BEFORE
 				// executing it (Rb may be the load's own dest), to compare against the JIT.
@@ -988,7 +990,7 @@ void CAlphaCPU::jit_run(int budget)
 					const u64 jmask = (opc == 0x1e) ? ~U64(2) : ~U64(3);
 					jtgt = (jrb == 31 ? (u64)0 : state.r[RREG(jrb)]) & jmask;
 					if (opc == 0x1a)
-						jtgt |= start_virt & 3;   // DO_JMP: mode bits come from the current pc
+						jtgt |= cur_tag & 3;   // DO_JMP: mode bits come from the current pc
 				}
 				execute();
 				--budget;
@@ -1003,18 +1005,18 @@ void CAlphaCPU::jit_run(int budget)
 					// the dispatcher's !check_int guard handles that) legitimately differs, so
 					// skip the compare instead of flagging a false mismatch.
 					bool ok_branch = false;
-					if (k == b->prefix_len - 1 &&
+					if (k == cur_len - 1 &&
 						(opc == 0x30 || opc == 0x34 || (opc >= 0x38 && opc <= 0x3f)))
 					{
 						const int64_t bdisp = (int64_t)((uint64_t)(ins & 0x1FFFFF) << 43) >> 43;
 						const u64 tgt = vpc + (u64)(bdisp * 4);   // vpc == branch_pc + 4 (fall-through)
 						ok_branch = (state.pc == tgt);
 					}
-					else if (k == b->prefix_len - 1 && (opc == 0x1a || opc == 0x1e))
+					else if (k == cur_len - 1 && (opc == 0x1a || opc == 0x1e))
 					{
 						ok_branch = (state.pc == jtgt);   // computed jump (JMP/HW_RET) reached its register target
 					}
-					else if (k == b->prefix_len - 1 && opc == 0x00)
+					else if (k == cur_len - 1 && opc == 0x00)
 					{
 						// CALL_PAL vectored to its PALcode entry (pal_base | offset); the kernel-mode
 						// path never traps, but accept the OPCDEC vector too.
@@ -1147,7 +1149,7 @@ void CAlphaCPU::jit_run(int budget)
 						u64 jr_t[64];
 						memcpy(jr_t, snap, sizeof(jr_t));
 						m_jit_vreplay = true; m_jit_vlog_i = 0; m_jit_slog_i = 0;
-						const u32 done_t = ((CJitEngine::JitFn) tr->code)(this, jr_t);
+						const u32 done_t = ((CJitEngine::JitFn)tr->code)(this, jr_t);
 						m_jit_vreplay = false;
 						if (done_t == tr->n_instr) {
 							if (state.pc != interp_pc)
