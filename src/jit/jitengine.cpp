@@ -532,8 +532,9 @@ CJitEngine::JitBlock* CJitEngine::revalidate_flushed(uint64_t virt_pc, uint32_t 
 //   2. epoch fresh (nothing flushed/ITB-invalidated since build) -> enter directly.
 //   3. epoch changed -> re-hash every fused segment. Unchanged bytes => the epoch bumped for an unrelated
 //      reason (e.g. an IMB on another page): keep the trace + re-stamp. Changed bytes (SMC/remap): stale.
-// Residual (wont do until multi-page traces are real): an INTERIOR page remapped to DIFFERENT physical
-// with IDENTICAL bytes is not caught by the hash, we need per-segment phys re-resolution. 
+// Interior coherence: the source hash here checks BYTES at the cached phys -- it can't see an interior page
+// remapped to a DIFFERENT physical with identical bytes. The CALLER closes that gap by re-resolving each
+// segment's LIVE physical: trace_segs_live (trace entry) + the recorder's per-successor check (formation).
 bool CJitEngine::trace_ok(TraceFragment* t, uint64_t head_live_phys, const uint8_t* dram)
 {
   if (t->n_segs == 0 || t->segs[0].phys_pc != head_live_phys)
@@ -2147,6 +2148,8 @@ void CJitEngine::compile_trace(TraceFragment* t, JitBlock** blocks, uint32_t n_b
   a.mov(x86::r15, x86::qword_ptr(x86::rbx, 27 * 8));   // R27 (PV) pin
 
   Label done = a.new_label();   // shared side-exit/return: EAX preset to the instr count, state.pc live
+  Label body = a.new_label();   // loop re-entry (after the prologue; pins + count stay live across iterations)
+  a.bind(body);
 
   for (uint32_t bi = 0; bi < n_blocks; ++bi) {
     JitBlock* b = blocks[bi];
@@ -2175,6 +2178,27 @@ void CJitEngine::compile_trace(TraceFragment* t, JitBlock** blocks, uint32_t n_b
       a.jne(done);
     }
   }
+#ifndef JIT_VERIFY
+  // Loop closure: if the last block branches back to the trace head, close the loop in compiled code with
+  // the budget/interrupt gate ON the back-edge (risk #1). Verify builds omit this -> the trace runs one
+  // iteration and exits at state.pc, so the side-exit verify validates the body unchanged.
+  { JitBlock* lb = blocks[n_blocks - 1];
+    const uint32_t* lw = (const uint32_t*) (dram + lb->phys);
+    const uint32_t lop = lw[lb->prefix_len - 1], lopc = lop >> 26;
+    if (lopc == 0x30 || lopc == 0x34 || (lopc >= 0x38 && lopc <= 0x3f)) {   // PC-relative branch terminator
+      const int64_t disp = (int64_t) ((uint64_t) (lop & 0x1FFFFF) << 43) >> 43;
+      const uint64_t tgt = (((lb->tag & ~(uint64_t) 1) + 4 * (uint64_t) (lb->prefix_len - 1)) + 4 + (uint64_t) (disp * 4)) | (lb->tag & 1);
+      if (tgt == blocks[0]->tag) {   // taken target == head -> a closable loop
+        a.mov(x86::rcx, imm(blocks[0]->tag));
+        a.cmp(x86::r10, x86::rcx); a.jne(done);                                    // not looping now -> exit
+        a.cmp(x86::r14, x86::qword_ptr(x86::rbp, m_off.jit_budget)); a.jge(done);   // budget ceiling
+        a.cmp(x86::byte_ptr(x86::rbp, m_off.check_int), imm(0));     a.jne(done);   // interrupt pending
+        a.cmp(x86::byte_ptr(x86::rbp, m_off.check_timers), imm(0));  a.jne(done);   // timer pending
+        a.jmp(body);                                                               // loop in compiled code
+      }
+    }
+  }
+#endif
   a.bind(done);
   a.mov(x86::qword_ptr(x86::rbx, 26 * 8), x86::r12);   // sync pins back to regs[] before returning
   a.mov(x86::qword_ptr(x86::rbx, 16 * 8), x86::r13);

@@ -488,7 +488,6 @@ void CAlphaCPU::init()
 	state.wait_for_start = (state.iProcNum == 0) ? false : true;
 	icache_enabled = true;
 	flush_icache();
-	icache_enabled = myCfg->get_bool_value("icache", true); // default on
 
 	tbia(ACCESS_READ);
 	tbia(ACCESS_EXEC);
@@ -551,7 +550,6 @@ void CAlphaCPU::ResetForSystemReset()
 	state.wait_for_start = (state.iProcNum == 0) ? false : true;
 	icache_enabled = true;
 	flush_icache();
-	icache_enabled = myCfg->get_bool_value("icache", true);
 
 	tbia(ACCESS_READ);
 	tbia(ACCESS_EXEC);
@@ -822,6 +820,15 @@ void CAlphaCPU::jit_run(int budget)
 				have_phys = false;
 		}
 
+		// Side-effect-free exec virt -> live physical (icache probe, else FAKE virt2phys). Re-resolves a trace
+		// segment's live mapping without a TB fill / fault; mirrors the dispatch-top resolution above.
+		auto live_exec_phys = [&](u64 v, u64* op) -> bool {
+			v &= ~U64(3);   // strip the PALmode tag bit / align -- the physical is page-determined
+			const int li = (int)((v >> 11) & (ICACHE_ENTRIES - 1));
+			if (icache_enabled && state.icache[li].valid && (state.icache[li].asn == state.asn || state.icache[li].asm_bit) && state.icache[li].address == (v & ICACHE_MATCH_MASK)) { *op = state.icache[li].p_address + (v & ICACHE_BYTE_MASK); return true; }
+			bool ad; return virt2phys(v, op, ACCESS_EXEC | FAKE, &ad, 0) == 0;
+		};
+
 		// Trace tier: gated lookup BEFORE the block cache. In non-debug release a hot trace runs
 		// straight through and side-exits back here with state.pc set, then `continue`; the block
 		// cache stays the universal fallback. Under JIT_VERIFY the production run is gated OFF,
@@ -832,11 +839,17 @@ void CAlphaCPU::jit_run(int budget)
 		// poll, so DON'T enter it while an interrupt/timer is pending (the interpreter must service it,
 		// or the CPU livelocks -> OS sanity-timer bugcheck), nor a PALmode trace without SDE, nor one
 		// that would overrun the budget.
+		auto trace_segs_live = [&](CJitEngine::TraceFragment* tf) -> bool {
+			// The head's live phys is checked by trace_ok; re-resolve each INTERIOR segment too. An interior
+			// page remapped to a different physical with IDENTICAL bytes is invisible to the source hash.
+			for (uint32_t s = 1; s < tf->n_segs; ++s) { u64 sp; if (!live_exec_phys(tf->segs[s].guest_pc, &sp) || sp != tf->segs[s].phys_pc) return false; }
+			return true;
+		};
 		if (have_phys && m_jit->traces_enabled() && !state.check_int && !state.check_timers)
 		{
 			CJitEngine::TraceFragment* t = m_jit->trace_lookup(start_virt, start_asn);
 			if (t && (int)t->n_instr <= budget && (!(t->head_tag & 1) || state.sde)
-				&& m_jit->trace_ok(t, start_phys, (const uint8_t*)dram_ptr))
+				&& m_jit->trace_ok(t, start_phys, (const uint8_t*)dram_ptr) && trace_segs_live(t))
 			{
 				m_jit_budget = budget;   // ceiling for the trace (its loads/bails honor it like a block)
 #ifdef JIT_STATS
@@ -900,18 +913,26 @@ void CAlphaCPU::jit_run(int budget)
 					(void*)&CAlphaCPU::jit_fltl,
 					(void*)&CAlphaCPU::jit_fp_read,     (void*)&CAlphaCPU::jit_fp_write,
 					(void*)&CAlphaCPU::jit_fltv };
-				CJitEngine::JitBlock* blist[2] = { b, nullptr };
+				// Loop/superblock FUSION: follow each block's STATIC taken branch target, growing the trace,
+				// until the chain branches back to the head (compile_trace then closes the loop) or hits a
+				// non-branch / non-live target / a non-head cycle / the segment cap. Works under verify too
+				// (b->link is only set by production chaining).
+				CJitEngine::JitBlock* blist[CJitEngine::kMaxTraceSegs] = { b };
 				u32 nb = 1;
-				// block FUSION! the head's STATIC branch target (its taken successor) when that's a live compiled
-				// block. works under verify too (b->link is only set by production chaining). Computed jumps /
-				// fall-throughs stay 1-block; a self-target is left to the block self-loop fast path.
-				{ const u32* aw = (const u32*)((const u8*)dram_ptr + b->phys);
-				  const u32 lop = aw[b->prefix_len - 1]; const u32 lopc = lop >> 26;
-				  if (lopc == 0x30 || lopc == 0x34 || (lopc >= 0x38 && lopc <= 0x3f)) {
-				    const int64_t disp = (int64_t)((uint64_t)(lop & 0x1FFFFF) << 43) >> 43;
-				    const u64 spc = (((b->tag & ~U64(1)) + 4 * (u64)(b->prefix_len - 1)) + 4 + (u64)(disp * 4)) | (b->tag & 1);
-				    CJitEngine::JitBlock* succ = m_jit->lookup(spc, start_asn);
-				    if (succ && succ != b && succ->code && succ->prefix_len > 0) { blist[1] = succ; nb = 2; } } }
+				for (CJitEngine::JitBlock* cur = b; nb < CJitEngine::kMaxTraceSegs; ) {
+				  const u32* aw = (const u32*)((const u8*)dram_ptr + cur->phys);
+				  const u32 lop = aw[cur->prefix_len - 1]; const u32 lopc = lop >> 26;
+				  if (!(lopc == 0x30 || lopc == 0x34 || (lopc >= 0x38 && lopc <= 0x3f))) break;   // not PC-relative
+				  const int64_t disp = (int64_t)((uint64_t)(lop & 0x1FFFFF) << 43) >> 43;
+				  const u64 spc = (((cur->tag & ~U64(1)) + 4 * (u64)(cur->prefix_len - 1)) + 4 + (u64)(disp * 4)) | (cur->tag & 1);
+				  if (spc == b->tag) break;   // back-edge to the head -> compile_trace closes the loop
+				  CJitEngine::JitBlock* succ = m_jit->lookup(spc, start_asn);
+				  if (!succ || succ == b || !succ->code || succ->prefix_len == 0) break;
+					  u64 sp; if (!live_exec_phys(spc, &sp) || sp != succ->phys) break;   // successor remapped since compile -> stale, don't fuse
+				  bool dup = false; for (u32 j = 0; j < nb; ++j) if (blist[j] == succ) { dup = true; break; }
+				  if (dup) break;
+				  blist[nb++] = succ; cur = succ;
+				}
 				m_jit->compile_trace(m_jit->trace_slot(start_virt), blist, nb, (const uint8_t*)dram_ptr, dram_size, hs);
 			}
 #ifdef JIT_VERIFY
@@ -4041,18 +4062,11 @@ void CAlphaCPU::enable_icache()
 }
 
 /**
- * \brief Enable or disable i-cache depending on config file.
+ * \brief Restore i-cache after temporary ROM decompression setup.
  **/
 void CAlphaCPU::restore_icache()
 {
-	bool  newval;
-
-	newval = myCfg->get_bool_value("icache", false);
-
-	if (!newval)
-		flush_icache();
-
-	icache_enabled = newval;
+	icache_enabled = true;
 }
 
 #if defined(IDB)

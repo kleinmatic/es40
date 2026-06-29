@@ -786,8 +786,7 @@ void CAliM1543C::superio_reset()
 	// (the IRQ12 wire is on KBD's reg 0x72), but NT may also probe LDN 8
 	// as a separate "logical" mouse device — keep it advertised so the
 	// PnP enumerator doesn't mark the port driver as "no mouse".
-	state.superio_ldn_regs[8][0x30] =
-		myCfg->get_bool_value("mouse.enabled", true) ? 0x01 : 0x00;
+	state.superio_ldn_regs[8][0x30] = 0x01;
 	state.superio_ldn_regs[8][0x70] = 0x0c;
 	state.superio_ldn_regs[8][0xf0] = 0x00;
 
