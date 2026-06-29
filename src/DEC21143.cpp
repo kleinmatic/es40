@@ -2010,7 +2010,7 @@ void CDEC21143::SetupFilter()
 	bool pass_multi = (state.reg[CSR_OPMODE / 8] & OPMODE_PM) != 0;
 	bool inverse = (state.reg[CSR_OPMODE / 8] & OPMODE_IF) != 0;
 
-	strcpy(filter, "ether broadcast");
+	strcpy(filter, "(arp or rarp or (udp port 67 or udp port 68))");  /* was "ether broadcast": only the broadcasts the guest needs (ARP+DHCP), not every LAN broadcast (rx_queue flood). PR/RA still match-all. */
 
 	if (!(promisc || receive_all)) {
 		if (pass_multi) {
