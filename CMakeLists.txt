@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 4.1)
+cmake_minimum_required(VERSION 3.31)
 
 project(ES40 LANGUAGES C CXX)
 
@@ -150,6 +150,7 @@ if (NOT WIN32)
     set(HAVE_SYS_TIME ${TM_IN_SYS_TIME})
 
     configure_file(src/config.h.cmake src/config.h)
+    include_directories(${CMAKE_CURRENT_BINARY_DIR}/src)
     add_compile_definitions(HAVE_CONFIG_H)
 endif()
 
@@ -290,6 +291,7 @@ if (NOT ES40_DISABLE_NETWORKING)
 endif()
 
 list(APPEND ES40_INCLUDES
+    ${CMAKE_CURRENT_BINARY_DIR}/src
     src/
     src/emu
     src/base
@@ -328,7 +330,9 @@ if (NOT ES40_DISABLE_LSS_LSM)
     endif()
 endif()
 
+find_package(Threads REQUIRED)
 target_link_libraries(es40 PUBLIC ${ES40_LIBRARIES})
+target_link_libraries(es40 PUBLIC Threads::Threads)
 if (NOT ES40_DISABLE_IDB)
     target_link_libraries(es40_idb PUBLIC ${ES40_LIBRARIES})
     if (NOT ES40_DISABLE_ASMJIT)
