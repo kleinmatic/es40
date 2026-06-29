@@ -915,7 +915,6 @@ int main(int argc, char* argv[])
 	card_q.addAnswer("nic", "dec21143", "DEC 21143 Network Interface (1 max)");
 #endif
 	card_q.addAnswer("scsi", "sym53c810", "Symbios 53C810 narrow SCSI controller");
-	card_q.addAnswer("wide scsi", "sym53c895", "Symbios 53C895 wide SCSI controller (doesn't work with OpenVMS)");
 	card_q.addAnswer("es1370 audio", "es1370", "ES1370 Audio card (works only with Windows NT 4.0)");
 
 	/* Loop until there are no more PCI
@@ -1011,29 +1010,6 @@ int main(int argc, char* argv[])
 			for (int i = 0; i < 7; i++)
 			{
 				disk_q.addAnswer(i2s(i), "disk0." + i2s(i), "Target " + i2s(i));
-			}
-			/* Ask what disks to add.
-			 */
-			add_disks(&disk_q, &os);
-		}
-		else if (card_q.getAnswer() == "sym53c895")
-		{
-			/* Use a ShrinkingChoiceQuestion; once
-			 * a disk position has been used, it
-			 * can't be used again.
-			 */
-			ShrinkingChoiceQuestion disk_q;
-			disk_q.setQuestion("Do you want to add any disks to the Sym53C895 controller?");
-			disk_q.setDefault("none");
-			disk_q.setExplanation("Add disks. Select 'none' if you have no more disks to add.");
-			disk_q.addAnswer("none", "", "stop adding disks");
-			/* The wide SCSI controller supports
-			 * devices at targets 0..6 and 8..15.
-			 */
-			for (int i = 0; i < 16; i++)
-			{
-				if (i != 7)
-					disk_q.addAnswer(i2s(i), "disk0." + i2s(i), "Target " + i2s(i));
 			}
 			/* Ask what disks to add.
 			 */
