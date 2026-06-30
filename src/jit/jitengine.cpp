@@ -538,7 +538,7 @@ CJitEngine::JitBlock* CJitEngine::revalidate_flushed(uint64_t virt_pc, uint32_t 
 bool CJitEngine::trace_ok(TraceFragment* t, uint64_t head_live_phys, const uint8_t* dram)
 {
   if (t->n_segs == 0 || t->segs[0].phys_pc != head_live_phys)
-    return false;                                     // head remap / ASN recycle
+    { note_trace_stale(); return false; }             // head remap / ASN recycle
   // A 1-block trace mirrors its head block's compiled prefix, whose length can change with NO source-byte
   // or epoch change: a fault-truncated cold record shrinks prefix_len (n_instr oscillates), a later clean
   // record regrows it invisibly to the hash below. If the live head block compiled a different length,
@@ -642,7 +642,7 @@ void CJitEngine::flush_non_global()
   for (int i = 0; i < kTraceEntries; ++i) {   // a trace spanning any !asm_global segment depends on a soft-dropped block -> drop it too
     if (!m_traces[i].valid) continue;
     for (uint32_t s = 0; s < m_traces[i].n_segs; ++s)
-      if (!m_traces[i].segs[s].asm_global) { m_traces[i].valid = false; break; }
+      if (!m_traces[i].segs[s].asm_global) { m_traces[i].valid = false; note_trace_stale(); break; }
   }
 }
 

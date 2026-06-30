@@ -842,7 +842,7 @@ void CAlphaCPU::jit_run(int budget)
 		auto trace_segs_live = [&](CJitEngine::TraceFragment* tf) -> bool {
 			// The head's live phys is checked by trace_ok; re-resolve each INTERIOR segment too. An interior
 			// page remapped to a different physical with IDENTICAL bytes is invisible to the source hash.
-			for (uint32_t s = 1; s < tf->n_segs; ++s) { u64 sp; if (!live_exec_phys(tf->segs[s].guest_pc, &sp) || sp != tf->segs[s].phys_pc) return false; }
+			for (uint32_t s = 1; s < tf->n_segs; ++s) { u64 sp; if (!live_exec_phys(tf->segs[s].guest_pc, &sp) || sp != tf->segs[s].phys_pc) { m_jit->note_trace_stale(); return false; } }
 			return true;
 		};
 		if (have_phys && m_jit->traces_enabled() && !state.check_int && !state.check_timers)
