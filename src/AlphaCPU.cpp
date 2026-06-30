@@ -867,6 +867,7 @@ void CAlphaCPU::jit_run(int budget)
 #ifdef JIT_STATS
 				cc_last_sync += std::chrono::nanoseconds(m_jit->note_exec(done, 0, _trace_tsc, 0));
 				m_jit->trace_entered();
+				if (done < (u32)t->n_instr) m_jit->trace_exited();   // ran fewer than the trace's first-pass span -> a side-exit/underrun
 #endif
 				if (done > 0) continue;  // progress: re-dispatch at the trace's exit PC
 			}
@@ -1137,6 +1138,7 @@ void CAlphaCPU::jit_run(int budget)
 				state.aster = aster_pre; state.astrr = astrr_pre;            // ...and the PCTX read-backs (a
 				state.fpen = fpen_pre; state.ppcen = ppcen_pre;              // HW_MFPR PCTX reads these live)
 				const u64 interp_pc = state.pc;   // interpreter is authoritative for the PC
+					const u32 n_stores_interp = sn;   // interp's RECORDED store count (sn), NOT the replay cursor m_jit_slog_i; a compiled pass must consume exactly this many (catches a missing/extra store)
 				m_jit_vreplay = true;
 				m_jit_vlog_i = 0;
 				m_jit_slog_i = 0;
@@ -1173,7 +1175,8 @@ void CAlphaCPU::jit_run(int budget)
 						printf("[JIT][VERIFY] FP MISMATCH at %016llx f%d: interp=%016llx jit=%016llx\n",
 							(unsigned long long) start_virt, fi,
 							(unsigned long long) f_interp[fi], (unsigned long long) state.f[fi]);
-					cc_last_sync += std::chrono::nanoseconds(m_jit->verify_compare(start_virt, state.r, jr, vw, b->prefix_len));   // don't bill the progress-print stall to RPCC
+					if (m_jit_slog_i != n_stores_interp) printf("[JIT][VERIFY] STORE COUNT MISMATCH at %016llx: interp=%u jit=%u\n", (unsigned long long) start_virt, n_stores_interp, m_jit_slog_i);
+						cc_last_sync += std::chrono::nanoseconds(m_jit->verify_compare(start_virt, state.r, jr, vw, b->prefix_len));   // don't bill the progress-print stall to RPCC
 				}
 				// verify extension: the production trace-run hook is gated off under JIT_VERIFY, so
 				// exercise the trace HERE; re-restore pre-interp state, run t->code on a 2nd scratch
@@ -1181,7 +1184,8 @@ void CAlphaCPU::jit_run(int budget)
 				// the trace's own state.pc write + frame visible to the differential harness.
 				if (m_jit->traces_enabled()) {
 					CJitEngine::TraceFragment* tr = m_jit->trace_lookup(start_virt, start_asn);
-					if (tr && m_jit->trace_ok(tr, start_phys, (const uint8_t*)dram_ptr)) {
+					if (tr && m_jit->trace_ok(tr, start_phys, (const uint8_t*)dram_ptr)
+							&& [&]{ for (uint32_t s = 1; s < tr->n_segs; ++s) { u64 sp; if (!live_exec_phys(tr->segs[s].guest_pc, &sp) || sp != tr->segs[s].phys_pc) return false; } return true; }()) {   // verify now mirrors the production hook's interior live-phys check
 						memcpy(state.f, f_pre, sizeof(f_pre));
 						state.sde = ictl_sde_pre; state.hwe = ictl_hwe_pre;
 						state.i_ctl_spe = ictl_spe_pre; state.i_ctl_va_mode = ictl_vam_pre;
@@ -1194,11 +1198,16 @@ void CAlphaCPU::jit_run(int budget)
 						m_jit_vreplay = true; m_jit_vlog_i = 0; m_jit_slog_i = 0;
 						const u32 done_t = ((CJitEngine::JitFn)tr->code)(this, jr_t);
 						m_jit_vreplay = false;
-						if (done_t == n_interp) {
+						if (done_t != n_interp) printf("[JIT][VERIFY] TRACE COUNT MISMATCH at %016llx: interp_span=%u trace_done=%u\n", (unsigned long long) start_virt, n_interp, done_t);
+							if (done_t == n_interp) {
 							if (state.pc != interp_pc)
 								printf("[JIT][VERIFY] TRACE PC MISMATCH at %016llx: interp=%016llx trace=%016llx (n=%u)\n",
 									(unsigned long long) start_virt, (unsigned long long) interp_pc,
 									(unsigned long long) state.pc, n_interp);
+							u64 ipr_jit_t[27]; cap_iprs(ipr_jit_t);   // trace wrote IPRs into live state; check vs interp (parity with the block path)
+							for (int ii = 0; ii < 27; ii++) if (ipr_jit_t[ii] != ipr_interp[ii]) printf("[JIT][VERIFY] TRACE IPR MISMATCH at %016llx slot %d: interp=%016llx trace=%016llx\n", (unsigned long long) start_virt, ii, (unsigned long long) ipr_interp[ii], (unsigned long long) ipr_jit_t[ii]);
+							for (int fi = 0; fi < 64; fi++) if (state.f[fi] != f_interp[fi]) printf("[JIT][VERIFY] TRACE FP MISMATCH at %016llx f%d: interp=%016llx trace=%016llx\n", (unsigned long long) start_virt, fi, (unsigned long long) f_interp[fi], (unsigned long long) state.f[fi]);
+							if (m_jit_slog_i != n_stores_interp) printf("[JIT][VERIFY] TRACE STORE COUNT MISMATCH at %016llx: interp=%u trace=%u\n", (unsigned long long) start_virt, n_stores_interp, m_jit_slog_i);
 							m_jit->verify_compare(start_virt, state.r, jr_t, vw, n_interp);
 						}
 					}

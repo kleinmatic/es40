@@ -543,14 +543,16 @@ bool CJitEngine::trace_ok(TraceFragment* t, uint64_t head_live_phys, const uint8
   // or epoch change: a fault-truncated cold record shrinks prefix_len (n_instr oscillates), a later clean
   // record regrows it invisibly to the hash below. If the live head block compiled a different length,
   // the trace is stale; drop it so the dispatcher re-forms a consistent one.
-  { const JitBlock& hb = m_blocks[index_of(t->head_tag)];
-    if (hb.valid && hb.tag == t->head_tag && hb.prefix_len != t->segs[0].n_instr) return false; }
+  for (uint32_t s = 0; s < t->n_segs; ++s) {   // ANY fused block's prefix_len can oscillate with no source/epoch change (not just the head)
+    const JitBlock& sb = m_blocks[index_of(t->segs[s].guest_pc)];
+    if (sb.valid && sb.tag == t->segs[s].guest_pc && sb.prefix_len != t->segs[s].n_instr) { note_trace_stale(); return false; }
+  }
   if (t->vgen == m_itb_gen + m_flush_gen)
     return true;                                      // epoch fresh: nothing changed since build
   for (uint32_t i = 0; i < t->n_segs; ++i) {
     const SourceSeg& s = t->segs[i];
     if (s.src_sum != src_hash(dram + s.phys_pc, s.n_instr))
-      return false;                                   // a segment's source bytes changed -> stale
+      { note_trace_stale(); return false; }            // a segment's source bytes changed -> stale
   }
   t->vgen = m_itb_gen + m_flush_gen;                  // all segments re-validated: re-stamp the epoch
   t->flush_gen = m_flush_gen;
@@ -636,6 +638,11 @@ void CJitEngine::flush_non_global()
       m_blocks[i].valid = false;
       m_blocks[i].jit_body = nullptr;
     }
+  }
+  for (int i = 0; i < kTraceEntries; ++i) {   // a trace spanning any !asm_global segment depends on a soft-dropped block -> drop it too
+    if (!m_traces[i].valid) continue;
+    for (uint32_t s = 0; s < m_traces[i].n_segs; ++s)
+      if (!m_traces[i].segs[s].asm_global) { m_traces[i].valid = false; break; }
   }
 }
 

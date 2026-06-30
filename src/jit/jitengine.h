@@ -170,8 +170,14 @@ public:
   // the slot a head PC maps to (formation fills it). Unlike trace_lookup, returns the slot
   // unconditionally so  the caller decides whether to (re)form into it.
   inline TraceFragment* trace_slot(uint64_t head_pc) { return &m_traces[trace_index_of(head_pc)]; }
+  inline void note_trace_stale() {   // always defined (callable from trace_ok); counts only under JIT_STATS
+#ifdef JIT_STATS
+    m_trace_stale++;
+#endif
+  }
 #ifdef JIT_STATS
   inline void trace_entered() { m_trace_entered++; }
+  inline void trace_exited()  { m_trace_exits++; }   // a trace side-exited / underran its first-pass span
 #endif
 
   inline TraceFragment* trace_lookup(uint64_t virt_pc, uint32_t asn)
