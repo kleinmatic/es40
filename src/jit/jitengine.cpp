@@ -491,7 +491,10 @@ CJitEngine::JitBlock* CJitEngine::record(uint64_t virt_pc, uint64_t phys_pc, uin
   b.flush_gen = m_flush_gen;
   b.code = nullptr;
   b.jit_body = nullptr;   // not compiled yet -> cached links to us must miss until compile
-  b.link = nullptr;       // no cached successor yet
+  for (int i = 0; i < kLinkSlots; ++i) b.link[i] = nullptr;   // no cached successors yet
+#ifdef JIT_STATS
+  b.link_misses = 0; b.link_fanout = 0;   // instrumentation: reset successor-fanout tracking on (re)use
+#endif
   b.prefix_len = 0;
   b.compiled = false;
   b.hot = 0;              // fresh block: restart the trace-promotion counter 
@@ -2006,29 +2009,36 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   // request (m_link_from = this block) and fall back. R10 = next PC; clobbers RAX/RCX/RDX.
   auto emit_chain = [&](Label& lbl) {
     Label miss = a.new_label();
-    a.mov(x86::rax, imm((uint64_t) &b->link));
-    a.mov(x86::rax, x86::qword_ptr(x86::rax));                 // succ = b->link
-    a.test(x86::rax, x86::rax);                            a.jz(miss);
-    a.mov(x86::rcx, x86::qword_ptr(x86::rax, off_body));       // succ->jit_body
-    a.test(x86::rcx, x86::rcx);                            a.jz(miss);
-    a.mov(x86::rdx, x86::qword_ptr(x86::rax, off_tag));        // succ->tag
-    a.cmp(x86::rdx, x86::r10);                             a.jne(miss);   // not this exit's target
-    // Single epoch guard, all successors: vgen = itb_gen + flush_gen at last validation; both
-    // counters are monotonic, so one sum compare catches a remap OR a flush since then.
+    // PAL/SDE guard once -- depends on the target (R10) + SDE, not the slot: a PALmode target's shadow
+    // remap assumes SDE, so if R10 is PAL and !SDE no cached slot may chain in.
+    { Label ok = a.new_label();
+      a.test(x86::r10, imm(1));                            a.jz(ok);
+      a.cmp(x86::byte_ptr(x86::rbp, m_off.sde), imm(0));   a.je(miss);   // PALmode + !SDE: don't
+      a.bind(ok); }
+    // Epoch sum once, reused by every slot: vgen = itb_gen + flush_gen at last validation; both counters
+    // are monotonic, so one sum compare catches a remap OR a flush since then.
     const uint32_t fg_off = (uint32_t) ((char*) &m_flush_gen - (char*) &m_itb_gen);
     a.mov(x86::rdx, imm((uint64_t) &m_itb_gen));
     a.mov(x86::r11, x86::qword_ptr(x86::rdx));
-    a.add(x86::r11, x86::qword_ptr(x86::rdx, fg_off));         // current epoch sum
-    a.cmp(x86::qword_ptr(x86::rax, off_vgen), x86::r11);  a.jne(miss);   // stale: revalidate via dispatcher
-    // PALmode successor (tag bit 0): its shadow remap assumes SDE -- the dispatcher's guard.
-    Label chain_ok = a.new_label();
-    a.test(x86::r10, imm(1));                             a.jz(chain_ok);
-    a.cmp(x86::byte_ptr(x86::rbp, m_off.sde), imm(0));    a.je(miss);    // PALmode + !SDE: don't
-    a.bind(chain_ok);
-    a.jmp(x86::rcx);                                           // HIT: tail in (shared frame)
+    a.add(x86::r11, x86::qword_ptr(x86::rdx, fg_off));         // r11 = current epoch sum
+    // Poly-link: walk the cached direct successors; the first LIVE one mapping this exit (tag == R10) tails
+    // in. A 2-successor block keeps both cached, so an alternating successor stops thrashing the dispatcher.
+    for (int sl = 0; sl < kLinkSlots; ++sl) {
+      Label nxt = (sl + 1 < kLinkSlots) ? a.new_label() : miss;
+      a.mov(x86::rax, imm((uint64_t) &b->link[sl]));
+      a.mov(x86::rax, x86::qword_ptr(x86::rax));                       // succ = b->link[sl]
+      a.test(x86::rax, x86::rax);                                  a.jz(nxt);
+      a.mov(x86::rcx, x86::qword_ptr(x86::rax, off_body));             // succ->jit_body (cleared on flush)
+      a.test(x86::rcx, x86::rcx);                                  a.jz(nxt);
+      a.mov(x86::rdx, x86::qword_ptr(x86::rax, off_tag));              // succ->tag
+      a.cmp(x86::rdx, x86::r10);                                   a.jne(nxt);   // not this exit's target
+      a.cmp(x86::qword_ptr(x86::rax, off_vgen), x86::r11);         a.jne(nxt);   // stale: revalidate via dispatcher
+      a.jmp(x86::rcx);                                                 // HIT: tail in (shared frame)
+      if (sl + 1 < kLinkSlots) a.bind(nxt);
+    }
     a.bind(miss);
     a.mov(x86::rax, imm((uint64_t) b));
-    a.mov(x86::qword_ptr(x86::rbp, m_off.link_from), x86::rax);   // request b->link patch
+    a.mov(x86::qword_ptr(x86::rbp, m_off.link_from), x86::rax);   // request a successor-cache patch
     // fall through to lbl (return to dispatcher)
   };
 #endif
@@ -2361,6 +2371,14 @@ uint64_t CJitEngine::note_exec(uint32_t native_instr, uint32_t interp_instr, uin
     printf("[JIT][STATS][CPU%d] traces: formed %llu | entered %llu | exits %llu | stale %llu (windowed)\n",
            m_cpu_id, (unsigned long long) m_trace_formed, (unsigned long long) m_trace_entered,
            (unsigned long long) m_trace_exits, (unsigned long long) m_trace_stale);
+  { uint64_t fh[6] = {0}, mh[6] = {0}, tm = 0;   // link-fanout: thrashing source blocks + cumulative misses, bucketed by #distinct successors
+    for (int i = 0; i < kCacheEntries; ++i) {
+      if (!m_blocks[i].valid || m_blocks[i].link_misses == 0) continue;
+      int f = m_blocks[i].link_fanout > 5 ? 5 : m_blocks[i].link_fanout;
+      fh[f]++; mh[f] += m_blocks[i].link_misses; tm += m_blocks[i].link_misses;
+    }
+    if (tm) printf("[JIT][STATS][CPU%d] link-fanout (srcs/misses by #distinct successors): f1=%llu/%llu f2=%llu/%llu f3=%llu/%llu f4=%llu/%llu f5+=%llu/%llu | total miss %llu\n",
+      m_cpu_id, (unsigned long long) fh[1], (unsigned long long) mh[1], (unsigned long long) fh[2], (unsigned long long) mh[2], (unsigned long long) fh[3], (unsigned long long) mh[3], (unsigned long long) fh[4], (unsigned long long) mh[4], (unsigned long long) fh[5], (unsigned long long) mh[5], (unsigned long long) tm); }
   len = snprintf(buf, sizeof(buf), "[JIT][STATS][CPU%d] %llu recorded, %llu compiled (avg %.1f instr) | block-breakers:",
                  m_cpu_id, (unsigned long long) m_recorded, (unsigned long long) m_stat_compiled, avgpl);
   uint64_t hist[64];

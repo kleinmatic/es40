@@ -1222,7 +1222,11 @@ void CAlphaCPU::jit_run(int budget)
 			// A predecessor block's epilogue cache-missed and asked to be linked here. Now
 			// that we know this block is live and compiled, patch its successor pointer so it
 			// jumps straight in instead of returning
-			if (m_link_from) { m_jit->note_link_bail(); ((CJitEngine::JitBlock*)m_link_from)->link = b; m_link_from = nullptr; }
+			if (m_link_from) { m_jit->note_link_bail(); m_jit->note_link_edge((CJitEngine::JitBlock*)m_link_from, b->tag);
+				CJitEngine::JitBlock* lf = (CJitEngine::JitBlock*)m_link_from; bool in = false;   // poly-link: cache b in the source's successor slots
+				for (int i = 0; i < CJitEngine::kLinkSlots; ++i) if (lf->link[i] == b) in = true;   // skip if already cached (it just went stale)
+				if (!in) { for (int i = CJitEngine::kLinkSlots - 1; i > 0; --i) lf->link[i] = lf->link[i-1]; lf->link[0] = b; }   // else round-robin insert
+				m_link_from = nullptr; }
 			m_jit_budget = budget;   // ceiling for compiled chains (epilogue stops at it)
 #ifdef JIT_STATS
 			const uint64_t _comp_t0 = jit_rdtsc();

@@ -57,6 +57,9 @@ public:
   // cpu for memory accesses; returns the number of instructions fully completed
   typedef uint32_t (*JitFn)(CAlphaCPU* cpu, uint64_t* regs);
 
+  static constexpr int kLinkSlots = 2;   // cached direct successors per block (poly-link). Instrumentation
+                                         // showed the thrashing fanout is EXACTLY 2; bump only if f3/f4 appear.
+
   struct JitBlock
   {
     uint64_t tag;         // start VIRTUAL PC (validity tag / key)
@@ -67,7 +70,12 @@ public:
     bool     valid;
     JitFn    code;        // compiled safe-prefix, or null (prologue entry, for C calls)
     void*    jit_body;    // chained re-entry point (after the prologue); null when not compiled
-    JitBlock* link;       // cached successor block (back-patched by the dispatcher); null = none
+    JitBlock* link[kLinkSlots];   // cached direct successors (poly-link, round-robin back-patched); null = empty
+#ifdef JIT_STATS
+    uint32_t link_misses; // instrumentation: per-source link-miss count, cumulative (poly-link sizing)
+    uint8_t  link_fanout; // distinct re-link targets seen (saturates at 4; >4 => a small successor cache won't help)
+    uint64_t link_seen[4];
+#endif
     uint32_t prefix_len;  // # safe ALU ops in code
     bool     compiled;    // compile has been attempted
     uint32_t body_off;    // jit_body's offset within code -- restores the chained entry on revalidate
@@ -173,6 +181,16 @@ public:
   inline void note_trace_stale() {   // always defined (callable from trace_ok); counts only under JIT_STATS
 #ifdef JIT_STATS
     m_trace_stale++;
+#endif
+  }
+  inline void note_link_edge(JitBlock* src, uint64_t tgt_tag) {   // instrument a source block's successor fanout (poly-link sizing)
+#ifdef JIT_STATS
+    src->link_misses++;
+    for (int i = 0; i < src->link_fanout && i < 4; ++i) if (src->link_seen[i] == tgt_tag) return;   // already counted
+    if (src->link_fanout < 4) src->link_seen[src->link_fanout] = tgt_tag;
+    if (src->link_fanout < 250) src->link_fanout++;
+#else
+    (void) src; (void) tgt_tag;
 #endif
   }
 #ifdef JIT_STATS
