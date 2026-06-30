@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 4.1)
+cmake_minimum_required(VERSION 3.24)
 
 project(ES40 LANGUAGES C CXX)
 
@@ -131,14 +131,14 @@ if (NOT WIN32)
     check_include_file("X11/X.h" HAVE_X11)
 
     set(PACKAGE \"${PROJECT_NAME}\")
-    set(PACKAGE_BUGREPORT "\"https://github.com/gdwnldsKSC/es40/issues/new\"")
+    set(PACKAGE_BUGREPORT "\"https://github.com/ES40-Emu/es40/issues/new\"")
     string(TOLOWER ${PROJECT_NAME} PACKAGE_NAME_L)
     set(PACKAGE_NAME \"${PACKAGE_NAME_L}\")
-    set(PROJECT_VERSION 0.65)
+    set(PROJECT_VERSION 0.74)
     set(PACKAGE_VERSION \"${PROJECT_VERSION}\")
     set(PACKAGE_STRING "\"${PACKAGE_NAME_L} ${PROJECT_VERSION}\"")
     set(PACKAGE_TARNAME \"${PACKAGE_NAME_L}.tar.gz\")
-    set(PACKAGE_URL "\"https://github.com/gdwnldsKSC/es40/issues\"")
+    set(PACKAGE_URL "\"https://github.com/ES40-Emu/es40/issues\"")
     set(VERSION \"${PROJECT_VERSION}\")
 
     set(RETSIGTYPE "void")
@@ -150,6 +150,7 @@ if (NOT WIN32)
     set(HAVE_SYS_TIME ${TM_IN_SYS_TIME})
 
     configure_file(src/config.h.cmake src/config.h)
+    include_directories(${CMAKE_CURRENT_BINARY_DIR}/src)
     add_compile_definitions(HAVE_CONFIG_H)
 endif()
 
@@ -289,7 +290,14 @@ if (NOT ES40_DISABLE_NETWORKING)
     endif()
 endif()
 
+if (NOT WIN32)
+    set(THREADS_PREFER_PTHREAD_FLAG ON)
+    find_package(Threads REQUIRED)
+    list(APPEND ES40_LIBRARIES Threads::Threads)
+endif()
+
 list(APPEND ES40_INCLUDES
+    ${CMAKE_CURRENT_BINARY_DIR}/src
     src/
     src/emu
     src/base
