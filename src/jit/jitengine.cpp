@@ -830,7 +830,7 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
                 a.jz(ok);
                 set_pc(b->tag + 4 * (uint64_t)i);               // resume at the faulting load
                 a.mov(x86::eax, imm(i));                          // this iteration: i instrs done
-                a.add(x86::eax, x86::r14d);                       // + earlier chained iterations
+                a.add(x86::eax, x86::dword_ptr(x86::rsp, 40));                       // + earlier chained iterations
                 a.jmp(done);
                 a.bind(ok);
                 if (op == OP_LDQ || op == OP_LDQ_U) a.mov(x86::rax, x86::qword_ptr(x86::rsp, 32));  // LDQ/LDQ_U: full quad
@@ -894,7 +894,7 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
                 a.jz(ok);
                 set_pc(b->tag + 4 * (uint64_t)i);                            // resume at the faulting store
                 a.mov(x86::eax, imm(i));                                       // this iteration: i instrs done
-                a.add(x86::eax, x86::r14d);                                    // + earlier chained iterations
+                a.add(x86::eax, x86::dword_ptr(x86::rsp, 40));                                    // + earlier chained iterations
                 a.jmp(done);
                 a.bind(ok);
                 };
@@ -963,7 +963,7 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
                 a.jz(ok);
                 set_pc(b->tag + 4 * (uint64_t)i);                            // resume at the faulting FP mem op
                 a.mov(x86::eax, imm(i));
-                a.add(x86::eax, x86::r14d);
+                a.add(x86::eax, x86::dword_ptr(x86::rsp, 40));
                 a.jmp(done);
                 a.bind(ok);
                 };
@@ -1024,7 +1024,7 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
             a.jz(nobail);
             set_pc(b->tag + 4 * (uint64_t)i);                              // resume at the faulting STx_C
             a.mov(x86::eax, imm(i));
-            a.add(x86::eax, x86::r14d);
+            a.add(x86::eax, x86::dword_ptr(x86::rsp, 40));
             a.jmp(done);
             a.bind(nobail);
             mov_to_reg(ra, x86::rax);                                      // Ra = success(1) / fail(0)
@@ -1048,7 +1048,7 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
             a.jz(ok);
             set_pc(b->tag + 4 * (uint64_t)i);                       // resume at the faulting HW_LD
             a.mov(x86::eax, imm(i));                                  // this iteration: i instrs done
-            a.add(x86::eax, x86::r14d);                               // + earlier chained iterations
+            a.add(x86::eax, x86::dword_ptr(x86::rsp, 40));                               // + earlier chained iterations
             a.jmp(done);
             a.bind(ok);
             // HW_LDL SIGN-extends the longword to canonical form (QEMU gen_hw_ld uses MO_LESL; the EV68CB
@@ -1073,7 +1073,7 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
             a.jz(ok);
             set_pc(b->tag + 4 * (uint64_t)i);                       // resume at the faulting LDx_L
             a.mov(x86::eax, imm(i));
-            a.add(x86::eax, x86::r14d);
+            a.add(x86::eax, x86::dword_ptr(x86::rsp, 40));
             a.jmp(done);
             a.bind(ok);
             a.mov(x86::rax, x86::qword_ptr(x86::rsp, 32));           // *out already sign-extended by the helper
@@ -1114,7 +1114,7 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
             a.jz(ok);
             set_pc(b->tag + 4 * (uint64_t)i);                       // resume at the faulting HW_ST
             a.mov(x86::eax, imm(i));
-            a.add(x86::eax, x86::r14d);
+            a.add(x86::eax, x86::dword_ptr(x86::rsp, 40));
             a.jmp(done);
             a.bind(ok);
             continue;
@@ -1165,7 +1165,7 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
             a.jz(ok);
             set_pc(b->tag + 4 * (uint64_t)i);               // FEN trap: resume here in the interpreter
             a.mov(x86::eax, imm(i));
-            a.add(x86::eax, x86::r14d);
+            a.add(x86::eax, x86::dword_ptr(x86::rsp, 40));
             a.jmp(done);
             a.bind(ok);
             continue;
@@ -1180,7 +1180,7 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
             a.jz(ok);
             set_pc(b->tag + 4 * (uint64_t)i);               // FEN trap: resume here in the interpreter
             a.mov(x86::eax, imm(i));
-            a.add(x86::eax, x86::r14d);
+            a.add(x86::eax, x86::dword_ptr(x86::rsp, 40));
             a.jmp(done);
             a.bind(ok);
             a.mov(x86::rax, x86::qword_ptr(x86::rsp, 32));
@@ -1217,7 +1217,7 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
             a.jmp(cont);
             a.bind(bail);
             set_pc(b->tag + 4 * (uint64_t)i);              // resume this instruction in the interpreter
-            a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::r14d); a.jmp(done);
+            a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::dword_ptr(x86::rsp, 40)); a.jmp(done);
             a.bind(cont);
             continue;
         }
@@ -1262,7 +1262,7 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
             a.jmp(cont);
             a.bind(bail);
             set_pc(b->tag + 4 * (uint64_t)i);
-            a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::r14d); a.jmp(done);
+            a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::dword_ptr(x86::rsp, 40)); a.jmp(done);
             a.bind(cont);
             continue;
         }
@@ -1304,7 +1304,7 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
             a.jmp(cont);
             a.bind(bail);
             set_pc(b->tag + 4 * (uint64_t)i);
-            a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::r14d); a.jmp(done);
+            a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::dword_ptr(x86::rsp, 40)); a.jmp(done);
             a.bind(cont);
             continue;
         }
@@ -1347,7 +1347,7 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
             a.jmp(cont);
             a.bind(bail);
             set_pc(b->tag + 4 * (uint64_t)i);
-            a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::r14d); a.jmp(done);
+            a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::dword_ptr(x86::rsp, 40)); a.jmp(done);
             a.bind(cont);
             continue;
         }
@@ -1371,7 +1371,7 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
             a.jmp(cont);
             a.bind(bail);
             set_pc(b->tag + 4 * (uint64_t)i);
-            a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::r14d); a.jmp(done);
+            a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::dword_ptr(x86::rsp, 40)); a.jmp(done);
             a.bind(cont);
             continue;
         }
@@ -1399,7 +1399,7 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
             a.jmp(cont);
             a.bind(bail);
             set_pc(b->tag + 4 * (uint64_t)i);
-            a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::r14d); a.jmp(done);
+            a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::dword_ptr(x86::rsp, 40)); a.jmp(done);
             a.bind(cont);
             continue;
         }
@@ -1429,7 +1429,7 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
             a.jmp(cont);
             a.bind(bail);
             set_pc(b->tag + 4 * (uint64_t)i);
-            a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::r14d); a.jmp(done);
+            a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::dword_ptr(x86::rsp, 40)); a.jmp(done);
             a.bind(cont);
             continue;
         }
@@ -1462,7 +1462,7 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
             a.jmp(cont);
             a.bind(bail);
             set_pc(b->tag + 4 * (uint64_t)i);
-            a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::r14d); a.jmp(done);
+            a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::dword_ptr(x86::rsp, 40)); a.jmp(done);
             a.bind(cont);
             continue;
         }
@@ -1475,7 +1475,7 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
             a.jz(ok);
             set_pc(b->tag + 4 * (uint64_t)i);               // FEN trap: resume here in the interpreter
             a.mov(x86::eax, imm(i));
-            a.add(x86::eax, x86::r14d);
+            a.add(x86::eax, x86::dword_ptr(x86::rsp, 40));
             a.jmp(done);
             a.bind(ok);
             continue;
@@ -1492,11 +1492,11 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
             a.je(trapped);                                   // 2: arith trap -- GO_PAL already set state.pc
             set_pc(b->tag + 4 * (uint64_t)i);               // 1: FEN trap (op not run) -> resume this instr
             a.mov(x86::eax, imm(i));
-            a.add(x86::eax, x86::r14d);
+            a.add(x86::eax, x86::dword_ptr(x86::rsp, 40));
             a.jmp(done);
             a.bind(trapped);                                 // op ran then diverted: count it, keep state.pc
             a.mov(x86::eax, imm(i + 1));
-            a.add(x86::eax, x86::r14d);
+            a.add(x86::eax, x86::dword_ptr(x86::rsp, 40));
             a.jmp(done);
             a.bind(ok);
             continue;
@@ -1539,8 +1539,8 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
                 a.cmp(x86::dword_ptr(x86::rbp, m_off.state_cm), imm(0));
                 a.je(do_vector);
                 emit_call(opcdec_helper, { {JA_CPU, 0}, {JA_I64, cpc} });  // jit_opcdec: sets state.pc/exc_addr, clears lock
-                a.add(x86::r14d, imm(i + 1));               // count the block; helper already wrote state.pc
-                a.mov(x86::eax, x86::r14d);
+                a.add(x86::qword_ptr(x86::rsp, 40), imm(i + 1));   // count the block; helper already wrote state.pc
+                a.mov(x86::eax, x86::dword_ptr(x86::rsp, 40));
                 a.jmp(done);                               // trap path exits (does not chain)
             }
             a.bind(do_vector);
@@ -1594,7 +1594,7 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
             a.jmp(cont);
             a.bind(bail);
             set_pc(b->tag + 4 * (uint64_t)i);                    // resume this instruction in the interpreter
-            a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::r14d); a.jmp(done);
+            a.mov(x86::eax, imm(i)); a.add(x86::eax, x86::dword_ptr(x86::rsp, 40)); a.jmp(done);
             a.bind(cont);
             continue;
         }
@@ -1934,19 +1934,28 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
 
   a.push(x86::rbx);
   a.push(x86::rbp);
-  a.push(x86::r14);            // callee-saved: accumulates the chain's instruction count
+  a.push(x86::r14);            // callee-saved: now a pin for Alpha R30 (SP); chain count moved to [rsp+40]
   a.push(x86::r12);            // callee-saved: pin for Alpha R26 (RA)
   a.push(x86::r13);            // callee-saved: pin for Alpha R16 (a0)
   a.push(x86::r15);            // callee-saved: pin for Alpha R27 (PV)
-  a.sub(x86::rsp, imm(40));    // 32 shadow + load-out slot; 6 pushes -> 40 keeps RSP 16-aligned at calls
+#ifdef _WIN32
+  a.push(x86::rsi);            // callee-saved on Win64: pin for Alpha R29 (GP)
+  a.push(x86::rdi);            // callee-saved on Win64: pin for Alpha R0 (v0)
+#endif
+  a.sub(x86::rsp, imm(56));    // 32 shadow + out slot + chain-count slot [rsp+40]; 6/8 pushes -> 56 keeps RSP 16-aligned
   a.mov(x86::rbp, aq(0));      // cpu  (arg 0)
   a.mov(x86::rbx, aq(1));      // regs (arg 1)
-  a.xor_(x86::r14d, x86::r14d);   // instruction count := 0
+  a.mov(x86::qword_ptr(x86::rsp, 40), imm(0));   // chain instruction count := 0 (reclaimed r14 -> stack slot)
   // Load the global pins from regs[] on cold entry. Chained re-entry jumps to `body` below,
   // skipping this -- the pins stay live in x86 across the whole chain, synced back at `done`.
   a.mov(x86::r12, x86::qword_ptr(x86::rbx, 26 * 8));   // R26 (RA)
   a.mov(x86::r13, x86::qword_ptr(x86::rbx, 16 * 8));   // R16 (a0)
   a.mov(x86::r15, x86::qword_ptr(x86::rbx, 27 * 8));   // R27 (PV)
+  a.mov(x86::r14, x86::qword_ptr(x86::rbx, 30 * 8));   // R30 (SP) -- reclaimed r14
+#ifdef _WIN32
+  a.mov(x86::rsi, x86::qword_ptr(x86::rbx, 29 * 8));   // R29 (GP)
+  a.mov(x86::rdi, x86::qword_ptr(x86::rbx,  0 * 8));   // R0 (v0)
+#endif
 
   Label done = a.new_label();  // shared exit: restore frame + ret (EAX preset by caller)
   Label body = a.new_label();  // chained re-entry (after the prologue; preserves R14)
@@ -1971,6 +1980,11 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   ra.host[kGlobalPins[0]] = (int) x86::r12.id();
   ra.host[kGlobalPins[1]] = (int) x86::r13.id();
   ra.host[kGlobalPins[2]] = (int) x86::r15.id();
+  ra.host[30] = (int) x86::r14.id();                  // SP (reclaimed r14), all platforms
+#ifdef _WIN32
+  ra.host[29] = (int) x86::rsi.id();                  // GP (Win64)
+  ra.host[0]  = (int) x86::rdi.id();                  // v0 (Win64)
+#endif
 
   const HelperSet hs = { read_helper, write_helper, opcdec_helper, hw_mfpr_helper, hw_ld_helper,
                        hw_mtpr_helper, hw_st_helper, indirect_helper, read_locked_helper, stc_helper,
@@ -1985,7 +1999,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
 #ifndef JIT_VERIFY
   // Gate the chain: stop if we've hit the budget ceiling or an interrupt/timer is pending
   auto emit_gate = [&](Label& lbl) {
-    a.cmp(x86::r14, x86::qword_ptr(x86::rbp, m_off.jit_budget)); a.jge(lbl);
+    a.mov(x86::rax, x86::qword_ptr(x86::rsp, 40)); a.cmp(x86::rax, x86::qword_ptr(x86::rbp, m_off.jit_budget)); a.jge(lbl);
     a.cmp(x86::byte_ptr(x86::rbp, m_off.check_int), imm(0));     a.jne(lbl);
     a.cmp(x86::byte_ptr(x86::rbp, m_off.check_timers), imm(0));  a.jne(lbl);
   };
@@ -2039,7 +2053,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     // Chain in-frame via jit_indirect -- the dispatcher's own block-cache lookup -- tailing into
     // the target's compiled body when it's live + runnable here. Unlike the old single-slot link
     // this keys on the ACTUAL target, so it handles all targets with no thrash on varying jumps.
-    a.add(x86::r14d, imm(plen));
+    a.add(x86::qword_ptr(x86::rsp, 40), imm(plen));
 #ifndef JIT_VERIFY
     Label exit_chain = a.new_label();
     emit_gate(exit_chain);                                        // budget/interrupt: bail to dispatcher
@@ -2052,7 +2066,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     a.bind(exit_chain);
 #endif
   } else if (terminator_branch) {
-    a.add(x86::r14d, imm(plen));   // R10 still holds the next PC (branch wrote state.pc + R10)
+    a.add(x86::qword_ptr(x86::rsp, 40), imm(plen));   // R10 still holds the next PC (branch wrote state.pc + R10)
 #ifndef JIT_VERIFY
     Label exit_chain = a.new_label();
     Label not_self   = a.new_label();
@@ -2068,7 +2082,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
 #endif
   } else {
     set_pc(b->tag + 4 * (uint64_t) plen);   // straight-line fall-through to the next block
-    a.add(x86::r14d, imm(plen));
+    a.add(x86::qword_ptr(x86::rsp, 40), imm(plen));
 #ifndef JIT_VERIFY
     Label exit_chain = a.new_label();
     emit_gate(exit_chain);
@@ -2076,14 +2090,23 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     a.bind(exit_chain);
 #endif
   }
-  a.mov(x86::eax, x86::r14d);   // total instructions completed across the chain
+  a.mov(x86::eax, x86::dword_ptr(x86::rsp, 40));   // total instructions completed across the chain
   a.bind(done);                 // bail jumps here with EAX already set
   // Sync the pins back to regs[] -- rbx still = regs (restored last), and every dispatcher exit
   // (fall-through or mid-block bail) reaches here, so regs[] is live when we return.
   a.mov(x86::qword_ptr(x86::rbx, 26 * 8), x86::r12);   // R26 (RA)
   a.mov(x86::qword_ptr(x86::rbx, 16 * 8), x86::r13);   // R16 (a0)
   a.mov(x86::qword_ptr(x86::rbx, 27 * 8), x86::r15);   // R27 (PV)
-  a.add(x86::rsp, imm(40));
+  a.mov(x86::qword_ptr(x86::rbx, 30 * 8), x86::r14);   // R30 (SP)
+#ifdef _WIN32
+  a.mov(x86::qword_ptr(x86::rbx, 29 * 8), x86::rsi);   // R29 (GP)
+  a.mov(x86::qword_ptr(x86::rbx,  0 * 8), x86::rdi);   // R0 (v0)
+#endif
+  a.add(x86::rsp, imm(56));
+#ifdef _WIN32
+  a.pop(x86::rdi);             // Win64 pins pop first (reverse push order)
+  a.pop(x86::rsi);
+#endif
   a.pop(x86::r15);              // pins pop in reverse push order
   a.pop(x86::r13);
   a.pop(x86::r12);
@@ -2148,13 +2171,21 @@ void CJitEngine::compile_trace(TraceFragment* t, JitBlock** blocks, uint32_t n_b
 
   a.push(x86::rbx); a.push(x86::rbp); a.push(x86::r14);
   a.push(x86::r12); a.push(x86::r13); a.push(x86::r15);
-  a.sub(x86::rsp, imm(40));
+#ifdef _WIN32
+  a.push(x86::rsi); a.push(x86::rdi);
+#endif
+  a.sub(x86::rsp, imm(56));
   a.mov(x86::rbp, x86::gpq(gpa[0]));                   // cpu
   a.mov(x86::rbx, x86::gpq(gpa[1]));                   // regs
-  a.xor_(x86::r14d, x86::r14d);
+  a.mov(x86::qword_ptr(x86::rsp, 40), imm(0));         // chain count := 0 (reclaimed r14 -> stack slot)
   a.mov(x86::r12, x86::qword_ptr(x86::rbx, 26 * 8));   // R26 (RA) pin
   a.mov(x86::r13, x86::qword_ptr(x86::rbx, 16 * 8));   // R16 (a0) pin
   a.mov(x86::r15, x86::qword_ptr(x86::rbx, 27 * 8));   // R27 (PV) pin
+  a.mov(x86::r14, x86::qword_ptr(x86::rbx, 30 * 8));   // R30 (SP) pin
+#ifdef _WIN32
+  a.mov(x86::rsi, x86::qword_ptr(x86::rbx, 29 * 8));   // R29 (GP) pin
+  a.mov(x86::rdi, x86::qword_ptr(x86::rbx,  0 * 8));   // R0 (v0) pin
+#endif
 
   Label done = a.new_label();   // shared side-exit/return: EAX preset to the instr count, state.pc live
   Label body = a.new_label();   // loop re-entry (after the prologue; pins + count stay live across iterations)
@@ -2166,6 +2197,11 @@ void CJitEngine::compile_trace(TraceFragment* t, JitBlock** blocks, uint32_t n_b
   ra.host[kGlobalPins[0]] = (int) x86::r12.id();
   ra.host[kGlobalPins[1]] = (int) x86::r13.id();
   ra.host[kGlobalPins[2]] = (int) x86::r15.id();
+  ra.host[30] = (int) x86::r14.id();                  // SP (reclaimed r14), all platforms
+#ifdef _WIN32
+  ra.host[29] = (int) x86::rsi.id();                  // GP (Win64)
+  ra.host[0]  = (int) x86::rdi.id();                  // v0 (Win64)
+#endif
 
   for (uint32_t bi = 0; bi < n_blocks; ++bi) {
     JitBlock* b = blocks[bi];
@@ -2183,8 +2219,8 @@ void CJitEngine::compile_trace(TraceFragment* t, JitBlock** blocks, uint32_t n_b
     for (uint32_t i = 0; i < plen; ++i)
       emit_op(&a, gpa, &done, hs, pal_block, b, words[i], i, ra);
 
-    a.add(x86::r14d, imm(plen));   // count this block
-    a.mov(x86::eax, x86::r14d);    // EAX = instrs completed so far (preset for `done` -- a side-exit or return)
+    a.add(x86::qword_ptr(x86::rsp, 40), imm(plen));   // count this block
+    a.mov(x86::eax, x86::dword_ptr(x86::rsp, 40));    // EAX = instrs completed so far (preset for `done` -- a side-exit or return)
 
     if (bi + 1 < n_blocks) {
       // Guard: did this block actually flow to the next fused block? R10 = its next PC; a mismatch means
@@ -2207,7 +2243,7 @@ void CJitEngine::compile_trace(TraceFragment* t, JitBlock** blocks, uint32_t n_b
       if (tgt == blocks[0]->tag) {   // taken target == head -> a closable loop
         a.mov(x86::rcx, imm(blocks[0]->tag));
         a.cmp(x86::r10, x86::rcx); a.jne(done);                                    // not looping now -> exit
-        a.cmp(x86::r14, x86::qword_ptr(x86::rbp, m_off.jit_budget)); a.jge(done);   // budget ceiling
+        a.mov(x86::rax, x86::qword_ptr(x86::rsp, 40)); a.cmp(x86::rax, x86::qword_ptr(x86::rbp, m_off.jit_budget)); a.jge(done);   // budget ceiling
         a.cmp(x86::byte_ptr(x86::rbp, m_off.check_int), imm(0));     a.jne(done);   // interrupt pending
         a.cmp(x86::byte_ptr(x86::rbp, m_off.check_timers), imm(0));  a.jne(done);   // timer pending
         a.jmp(body);                                                               // loop in compiled code
@@ -2219,7 +2255,15 @@ void CJitEngine::compile_trace(TraceFragment* t, JitBlock** blocks, uint32_t n_b
   a.mov(x86::qword_ptr(x86::rbx, 26 * 8), x86::r12);   // sync pins back to regs[] before returning
   a.mov(x86::qword_ptr(x86::rbx, 16 * 8), x86::r13);
   a.mov(x86::qword_ptr(x86::rbx, 27 * 8), x86::r15);
-  a.add(x86::rsp, imm(40));
+  a.mov(x86::qword_ptr(x86::rbx, 30 * 8), x86::r14);   // R30 (SP)
+#ifdef _WIN32
+  a.mov(x86::qword_ptr(x86::rbx, 29 * 8), x86::rsi);   // R29 (GP)
+  a.mov(x86::qword_ptr(x86::rbx,  0 * 8), x86::rdi);   // R0 (v0)
+#endif
+  a.add(x86::rsp, imm(56));
+#ifdef _WIN32
+  a.pop(x86::rdi); a.pop(x86::rsi);
+#endif
   a.pop(x86::r15); a.pop(x86::r13); a.pop(x86::r12);
   a.pop(x86::r14); a.pop(x86::rbp); a.pop(x86::rbx);
   a.ret();
