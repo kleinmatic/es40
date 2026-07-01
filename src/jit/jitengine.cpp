@@ -783,6 +783,17 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
             else if (rb == 31) a.xor_(x86::ecx, x86::ecx);
             else               mov_from_reg(x86::rcx, rb);
             };
+        // op2 as a DIRECT ALU source, folding away the mov-to-rcx: literal imm, R31 -> 0, a pinned host
+        // reg, or the regs[] memory slot -- all valid `OP rax, <src>` sources. emit_alu2 uses it for the
+        // simple accumulate-into-rax ops (rax stays the dest, so no aliasing concern).
+        auto op2op = [&]() -> Operand {
+            if (islit)    return imm(lit);
+            if (rb == 31) return imm(0);
+            int p = pin_id(rb);
+            if (p >= 0)   return x86::gpq((uint32_t) p);
+            return reg(rb);
+            };
+        auto emit_alu2 = [&](uint32_t instId) { op1_rax(); a.emit(instId, x86::rax, op2op()); };
 
         // ABI-native helper call.
         // Each JitArg names an argument source; the k # source is placed in arg register k (aq/ad).
@@ -1718,11 +1729,11 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
         }
 
         switch (op) {
-        case OP_ADDQ:  op1_rax(); op2_rcx(); a.add(x86::rax, x86::rcx); break;
-        case OP_SUBQ:  op1_rax(); op2_rcx(); a.sub(x86::rax, x86::rcx); break;
-        case OP_AND:   op1_rax(); op2_rcx(); a.and_(x86::rax, x86::rcx); break;
-        case OP_BIS:   op1_rax(); op2_rcx(); a.or_(x86::rax, x86::rcx); break;
-        case OP_XOR:   op1_rax(); op2_rcx(); a.xor_(x86::rax, x86::rcx); break;
+        case OP_ADDQ:  emit_alu2(x86::Inst::kIdAdd); break;
+        case OP_SUBQ:  emit_alu2(x86::Inst::kIdSub); break;
+        case OP_AND:   emit_alu2(x86::Inst::kIdAnd); break;
+        case OP_BIS:   emit_alu2(x86::Inst::kIdOr);  break;
+        case OP_XOR:   emit_alu2(x86::Inst::kIdXor); break;
         case OP_BIC:   op1_rax(); op2_rcx(); a.not_(x86::rcx); a.and_(x86::rax, x86::rcx); break;
         case OP_ORNOT: op1_rax(); op2_rcx(); a.not_(x86::rcx); a.or_(x86::rax, x86::rcx); break;
         case OP_EQV:   op1_rax(); op2_rcx(); a.not_(x86::rcx); a.xor_(x86::rax, x86::rcx); break;
