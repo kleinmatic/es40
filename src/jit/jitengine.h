@@ -221,6 +221,7 @@ public:
   // the chain; dynamic block-local pool next. host_of(r) drives emit_op's operand routing either way.
   struct RegAlloc {
     int host[32];                                  // host x86 reg id for guest GPR r, or -1 (memory)
+    int rax_holds;                                 // guest GPR whose value currently lives in rax (value-forward), or -1
     int host_of(int r) const { return host[r]; }
   };
 

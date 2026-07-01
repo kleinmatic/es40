@@ -744,6 +744,11 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
         if (op == OP_NOP)    continue;
         if (op == OP_MFENCE) { a.mfence(); continue; }
 
+        // Value-forwarding: rax may still hold the guest reg the previous op computed. Capture that for
+        // op1_rax's reuse, then default-invalidate; only mov_to_reg(_, rax) below re-marks what rax holds.
+        const int prev_rax = regalloc.rax_holds;
+        regalloc.rax_holds = -1;
+
         auto reg = [&](int r) {
             // PALshadow (RREG, AlphaCPU.h): in a PALmode block with SDE set, R4-7 and R20-23 map to
             // the shadow bank r[r+32]. 
@@ -773,8 +778,10 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
             int p = pin_id(r);
             if (p >= 0) a.mov(x86::gpq((uint32_t)p), src);
             else        a.mov(reg(r), src);
+            if (src.id() == x86::rax.id() && r != 31) regalloc.rax_holds = r;   // rax now mirrors r[r]; forward it
             };
         auto op1_rax = [&]() {
+            if (ra != 31 && prev_rax == ra) return;   // value-forward: rax already holds Ra (prev op's result)
             if (ra == 31) a.xor_(x86::eax, x86::eax);
             else          mov_from_reg(x86::rax, ra);
             };
@@ -1988,6 +1995,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
   // chain) are the static binding today. Dynamic next. 
   RegAlloc ra;
   for (int r = 0; r < 32; ++r) ra.host[r] = -1;
+  ra.rax_holds = -1;
   ra.host[kGlobalPins[0]] = (int) x86::r12.id();
   ra.host[kGlobalPins[1]] = (int) x86::r13.id();
   ra.host[kGlobalPins[2]] = (int) x86::r15.id();
@@ -2205,6 +2213,7 @@ void CJitEngine::compile_trace(TraceFragment* t, JitBlock** blocks, uint32_t n_b
   // Block register allocator: the 3 global pins (static, live across the trace). dynamic pool in future.
   RegAlloc ra;
   for (int r = 0; r < 32; ++r) ra.host[r] = -1;
+  ra.rax_holds = -1;
   ra.host[kGlobalPins[0]] = (int) x86::r12.id();
   ra.host[kGlobalPins[1]] = (int) x86::r13.id();
   ra.host[kGlobalPins[2]] = (int) x86::r15.id();
