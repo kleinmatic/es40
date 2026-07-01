@@ -703,7 +703,7 @@ static uint32_t regprof_mask(const uint32_t* w, uint32_t n)
 static const int kGlobalPins[3] = { 26, 16, 27 };
 
 void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const HelperSet& hs,
-    bool pal_block, JitBlock* b, uint32_t ins, uint32_t i, const int* pins)
+    bool pal_block, JitBlock* b, uint32_t ins, uint32_t i, RegAlloc& regalloc)
 {
     using namespace asmjit;
     x86::Assembler& a = *(x86::Assembler*)a_ptr;
@@ -726,11 +726,8 @@ void CJitEngine::emit_op(void* a_ptr, const uint8_t* gpa, void* done_ptr, const 
         a.mov(x86::r10, imm(pc_val));
         a.mov(x86::qword_ptr(x86::rbp, m_off.state_pc), x86::r10);
         };
-    auto pin_id = [&](int r) -> int {        // pins[0..2] -> r12/r13/r15 (trace-local set for compile_trace)
-        if (r == pins[0]) return (int)x86::r12.id();
-        if (r == pins[1]) return (int)x86::r13.id();
-        if (r == pins[2]) return (int)x86::r15.id();
-        return -1;
+    auto pin_id = [&](int r) -> int {        // r -> its bound host reg id, or -1 = the state.r[] memory slot
+        return regalloc.host_of(r);
         };
 
     int ra = (ins >> 21) & 0x1F;
@@ -1967,18 +1964,13 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
     a.mov(x86::qword_ptr(x86::rbp, m_off.state_pc), x86::r10);
   };
 
-  // basic global register pins (JIT_REGPROF data: R26=RA, R16=a0, R27=PV dominate the
-  // call-heavy hot path). Each maps to a callee-saved x86 reg free under both Win64 and SysV
-  // (R12/R13/R15; see kPinnedGp). pin_id(r) -> the x86 reg id, or -1 if r isn't pinned.
-  // Returning -1 for all (the kill-switch) reverts every access site to the regs[] memory path.
-  auto pin_id = [&](int r) -> int {
-    switch (r) {
-      case 26: return (int) x86::r12.id();
-      case 16: return (int) x86::r13.id();
-      case 27: return (int) x86::r15.id();
-      default: return -1;
-    }
-  };
+  // Block register allocator: the 3 global pins (R26/R16/R27 -> r12/r13/r15, callee-saved, live across the
+  // chain) are the static binding today. Dynamic next. 
+  RegAlloc ra;
+  for (int r = 0; r < 32; ++r) ra.host[r] = -1;
+  ra.host[kGlobalPins[0]] = (int) x86::r12.id();
+  ra.host[kGlobalPins[1]] = (int) x86::r13.id();
+  ra.host[kGlobalPins[2]] = (int) x86::r15.id();
 
   const HelperSet hs = { read_helper, write_helper, opcdec_helper, hw_mfpr_helper, hw_ld_helper,
                        hw_mtpr_helper, hw_st_helper, indirect_helper, read_locked_helper, stc_helper,
@@ -1986,7 +1978,7 @@ void CJitEngine::compile_block(JitBlock* b, const uint8_t* dram, uint64_t dram_s
                        fltl_helper, fp_read_helper, fp_write_helper, fltv_helper };
 
   for (uint32_t i = 0; i < plen; ++i)
-      emit_op(&a, gpa, &done, hs, pal_block, b, words[i], i, kGlobalPins);
+      emit_op(&a, gpa, &done, hs, pal_block, b, words[i], i, ra);
 
   // Epilogue. Count this block's instructions, then chain into the next block (staying
   // in native code) or return to the dispatcher.
@@ -2168,6 +2160,13 @@ void CJitEngine::compile_trace(TraceFragment* t, JitBlock** blocks, uint32_t n_b
   Label body = a.new_label();   // loop re-entry (after the prologue; pins + count stay live across iterations)
   a.bind(body);
 
+  // Block register allocator: the 3 global pins (static, live across the trace). dynamic pool in future.
+  RegAlloc ra;
+  for (int r = 0; r < 32; ++r) ra.host[r] = -1;
+  ra.host[kGlobalPins[0]] = (int) x86::r12.id();
+  ra.host[kGlobalPins[1]] = (int) x86::r13.id();
+  ra.host[kGlobalPins[2]] = (int) x86::r15.id();
+
   for (uint32_t bi = 0; bi < n_blocks; ++bi) {
     JitBlock* b = blocks[bi];
     const uint32_t plen = b->prefix_len;
@@ -2182,7 +2181,7 @@ void CJitEngine::compile_trace(TraceFragment* t, JitBlock** blocks, uint32_t n_b
     a.mov(x86::qword_ptr(x86::rbp, m_off.state_pc), x86::r10);
 
     for (uint32_t i = 0; i < plen; ++i)
-      emit_op(&a, gpa, &done, hs, pal_block, b, words[i], i, kGlobalPins);
+      emit_op(&a, gpa, &done, hs, pal_block, b, words[i], i, ra);
 
     a.add(x86::r14d, imm(plen));   // count this block
     a.mov(x86::eax, x86::r14d);    // EAX = instrs completed so far (preset for `done` -- a side-exit or return)
