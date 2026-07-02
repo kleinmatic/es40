@@ -1024,6 +1024,46 @@ void CConfigurator::initialize()
 		break;
 	}
 
+	// The ES40 hardware always has two serial ports; SRM and guest OSes
+	// expect both UARTs to exist. Synthesize any port missing from the
+	// configuration as a null_attach (bit-bucket) port.
+	if (myFlags & IS_CS)
+	{
+		bool have_serial[2] = { false, false };
+		for (i = 0; i < iNumChildren; i++)
+		{
+			if (!strcmp(pChildren[i]->get_myValue(), "serial"))
+			{
+				number = 0;
+				if (!strncmp(pChildren[i]->get_myName(), "serial", 6))
+					number = atoi(&pChildren[i]->get_myName()[6]);
+				if (number >= 0 && number < 2)
+					have_serial[number] = true;
+			}
+		}
+
+		for (number = 0; number < 2; number++)
+		{
+			if (have_serial[number])
+				continue;
+
+			if (iNumChildren >= CFG_MAX_CHILDREN)
+				FAILURE_1(Configuration,
+					"No room to add default configuration for serial%d", number);
+
+			printf("%%SYS-W-NOSERIAL: serial%d is not configured; "
+				"defaulting to null_attach mode.\n", number);
+
+			char* sname = (char*)malloc(8);
+			sprintf(sname, "serial%d", number);
+			char* svalue = (char*)malloc(7);
+			strcpy(svalue, "serial");
+			char stext[] = "null_attach=true;";
+			pChildren[iNumChildren++] = new CConfigurator(this, sname, svalue,
+				stext, strlen(stext));
+		}
+	}
+
 	for (i = 0; i < iNumChildren; i++)
 		pChildren[i]->initialize();
 
