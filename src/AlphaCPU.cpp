@@ -1176,7 +1176,8 @@ void CAlphaCPU::jit_run(int budget)
 							(unsigned long long) start_virt, fi,
 							(unsigned long long) f_interp[fi], (unsigned long long) state.f[fi]);
 					if (m_jit_slog_i != n_stores_interp) printf("[JIT][VERIFY] STORE COUNT MISMATCH at %016llx: interp=%u jit=%u\n", (unsigned long long) start_virt, n_stores_interp, m_jit_slog_i);
-						cc_last_sync += std::chrono::nanoseconds(m_jit->verify_compare(start_virt, state.r, jr, vw, b->prefix_len));   // don't bill the progress-print stall to RPCC
+						cc_last_sync += std::chrono::nanoseconds(m_jit->verify_compare(start_virt, state.r, jr, vw, b->prefix_len) + g_diag_excluded_ns);   // don't bill the verify progress-print OR the PCI decode-off diag stall to the RPCC
+						g_diag_excluded_ns = 0;   // consumed here in the verify path so jit_run's later sync doesn't double-count it
 				}
 				// verify extension: the production trace-run hook is gated off under JIT_VERIFY, so
 				// exercise the trace HERE; re-restore pre-interp state, run t->code on a 2nd scratch
