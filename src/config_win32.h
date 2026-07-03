@@ -41,7 +41,7 @@
   **/
 
   /* Version number of package */
-#define VERSION "0.74"
+#define VERSION "0.75"
 
 /* Define to 1 if you have the `alarm' function. */
 #define HAVE_ALARM 1
