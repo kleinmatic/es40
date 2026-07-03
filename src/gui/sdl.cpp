@@ -128,6 +128,8 @@ private:
 	bool           vid_linear = true;
 	bool           vid_scale_change_enable = false;
 	double         mouse_speed = 1.0;
+	bool           mouse_invert_x = false;
+	bool           mouse_invert_y = false;
 	void           reset_window_size();
 	void           adjust_window_scale(int delta);
 };
@@ -205,6 +207,9 @@ void bx_sdl_gui_c::specific_init(unsigned x_tilesize, unsigned y_tilesize)
 		printf("%%SDL-W-MOUSESPEED: invalid mouse.speed \"%s\" (valid: 0.0 < speed <= 10.0); using 1.0.\n", ms);
 		this->mouse_speed = 1.0;
 	}
+
+	this->mouse_invert_x = myCfg->get_bool_value("mouse.invert_x", false);
+	this->mouse_invert_y = myCfg->get_bool_value("mouse.invert_y", false);
 
 	new_gfx_api = 1;
 }
@@ -407,8 +412,12 @@ void bx_sdl_gui_c::handle_events(void)
 		case SDL_EVENT_MOUSE_MOTION:
 			if (sdl_grab)
 			{
-				sdl_mouse_accum_x += (double)sdl_event.motion.xrel * mouse_speed;
-				sdl_mouse_accum_y -= (double)sdl_event.motion.yrel * mouse_speed;
+				// PS/2 mouse Y is positive-up, SDL is positive-down; hence the
+				// baseline Y negation. invert_x/y flip on top of that.
+				double mx = (double)sdl_event.motion.xrel * mouse_speed;
+				double my = -(double)sdl_event.motion.yrel * mouse_speed;
+				sdl_mouse_accum_x += mouse_invert_x ? -mx : mx;
+				sdl_mouse_accum_y += mouse_invert_y ? -my : my;
 
 				int dx = (int)sdl_mouse_accum_x;
 				int dy = (int)sdl_mouse_accum_y;
