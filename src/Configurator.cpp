@@ -689,31 +689,63 @@ typedef struct
 	const char* name;
 	classid id;
 	int     flags;
+	const char* const* known_values;  // values the class reads; others warn
 } classinfo;
 
+// Configuration values each device class actually reads. Anything else found
+// in a device's config section is ignored by the code, so initialize() warns
+// the user to remove it.
+static const char* const kv_none[] = { 0 };
+static const char* const kv_tsunami[] = {
+  "memory.bits", "rom.srm", "rom.flash", "rom.dpr", "time",
+  "arc_year_compat", 0 };
+static const char* const kv_ev68cb[] = { "speed", "palcode.vms.nohle", 0 };
+static const char* const kv_serial[] = {
+  "port", "action", "disabled", "raw_mode", "null_attach", 0 };
+static const char* const kv_ali[] = { "vga_console", "lpt.outfile", 0 };
+static const char* const kv_ali_ide[] = { "dma", 0 };
+static const char* const kv_vga[] = { "rom", 0 };
+static const char* const kv_dec21143[] = {
+  "adapter", "mac", "queue", "crc", "trace_packets", 0 };
+static const char* const kv_disk_file[] = {
+  "file", "model_number", "serial_number", "serial_num", "rev_number",
+  "rev_num", "read_only", "cdrom", "autocreate_size", 0 };
+static const char* const kv_disk_device[] = {
+  "device", "model_number", "serial_number", "serial_num", "rev_number",
+  "rev_num", "read_only", "cdrom", 0 };
+static const char* const kv_disk_ram[] = {
+  "size", "file", "model_number", "serial_number", "serial_num", "rev_number",
+  "rev_num", "read_only", "cdrom", 0 };
+static const char* const kv_gui_sdl[] = {
+  "keyboard.use_mapping", "keyboard.map", "mouse.speed", "video.linear",
+  "video.scale_ratio", "video.scale_change_enable", 0 };
+static const char* const kv_gui_x11[] = {
+  "keyboard.use_mapping", "keyboard.map", "private_colormap", 0 };
+static const char* const kv_mpu401[] = { "midi_out", 0 };
+
 classinfo classes[] = {
-  {"tsunami", c_tsunami, N_P | IS_CS | HAS_PCI},
-  {"ev68cb", c_ev68cb, ON_CS},
-  {"ali", c_ali, IS_PCI | HAS_ISA},
-  {"ali_ide", c_ali_ide, IS_PCI | HAS_DISK},
-  {"ali_usb", c_ali_usb, IS_PCI},
-  {"ali_pmu", c_ali_pmu, IS_PCI},
-  {"serial", c_serial, ON_CS},
-  {"s3", c_s3, IS_PCI | ON_GUI},
-  //{"cirrus", c_cirrus, IS_PCI | ON_GUI},
-  {"dec21143", c_dec21143, IS_PCI | IS_NIC},
-  {"sym53c895", c_sym53c895, IS_PCI | HAS_DISK},
-  {"sym53c810", c_sym53c810, IS_PCI | HAS_DISK},
-  {"floppy", c_floppy, ON_CS | HAS_DISK},
-  {"file", c_file, IS_DISK},
-  {"device", c_device, IS_DISK},
-  {"ramdisk", c_ramdisk, IS_DISK},
-  {"sdl", c_sdl, N_P | IS_GUI},
-  {"win32", c_sdl, N_P | IS_GUI},
-  {"X11", c_x11, N_P | IS_GUI},
-  {"mpu401", c_mpu401, ON_CS },
-  {"es1370", c_es1370, IS_PCI},
-  {0, c_none, 0}
+  {"tsunami", c_tsunami, N_P | IS_CS | HAS_PCI, kv_tsunami},
+  {"ev68cb", c_ev68cb, ON_CS, kv_ev68cb},
+  {"ali", c_ali, IS_PCI | HAS_ISA, kv_ali},
+  {"ali_ide", c_ali_ide, IS_PCI | HAS_DISK, kv_ali_ide},
+  {"ali_usb", c_ali_usb, IS_PCI, kv_none},
+  {"ali_pmu", c_ali_pmu, IS_PCI, kv_none},
+  {"serial", c_serial, ON_CS, kv_serial},
+  {"s3", c_s3, IS_PCI | ON_GUI, kv_vga},
+  //{"cirrus", c_cirrus, IS_PCI | ON_GUI, kv_vga},
+  {"dec21143", c_dec21143, IS_PCI | IS_NIC, kv_dec21143},
+  {"sym53c895", c_sym53c895, IS_PCI | HAS_DISK, kv_none},
+  {"sym53c810", c_sym53c810, IS_PCI | HAS_DISK, kv_none},
+  {"floppy", c_floppy, ON_CS | HAS_DISK, kv_none},
+  {"file", c_file, IS_DISK, kv_disk_file},
+  {"device", c_device, IS_DISK, kv_disk_device},
+  {"ramdisk", c_ramdisk, IS_DISK, kv_disk_ram},
+  {"sdl", c_sdl, N_P | IS_GUI, kv_gui_sdl},
+  {"win32", c_sdl, N_P | IS_GUI, kv_gui_sdl},
+  {"X11", c_x11, N_P | IS_GUI, kv_gui_x11},
+  {"mpu401", c_mpu401, ON_CS, kv_mpu401},
+  {"es1370", c_es1370, IS_PCI, kv_none},
+  {0, c_none, 0, 0}
 };
 
 /**
@@ -745,6 +777,30 @@ void CConfigurator::initialize()
 
 	if (myClassId == c_none)
 		FAILURE_2(Configuration, "Class %s for %s not known", myValue, myName);
+
+	// Warn about configuration values this device class does not read;
+	// they have no effect and should be removed from the config file.
+	if (classes[i].known_values)
+	{
+		for (int v = 0; v < iNumValues; v++)
+		{
+			bool recognized = false;
+			for (const char* const* k = classes[i].known_values; *k; k++)
+			{
+				if (!strcmp(pValues[v].name, *k))
+				{
+					recognized = true;
+					break;
+				}
+			}
+
+			if (!recognized)
+				printf("%%SYS-W-UNKNOWNCFG: %s(%s): \"%s\" is not a recognized "
+					"configuration value for this device; it has been ignored "
+					"and should be removed from the configuration file.\n",
+					myName, myValue, pValues[v].name);
+		}
+	}
 
 	if (myFlags & N_P)
 	{

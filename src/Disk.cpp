@@ -156,8 +156,12 @@ CDisk::CDisk(CConfigurator* cfg, CSystem* sys, CDiskController* ctrl,
 		strlen(a) + strlen(b) + strlen(c) + strlen(d) + 6));
 	sprintf(devid_string, "%s(%s).%s(%s)", c, d, a, b);
 
-	serial_number = myCfg->get_text_value("serial_num", "ES40EM00000");
-	revision_number = myCfg->get_text_value("rev_num", "0.0");
+	// Accept both spellings: es40-cfg and the sample config have always
+	// emitted the long forms, while the code historically read the short ones.
+	serial_number = myCfg->get_text_value("serial_number",
+		myCfg->get_text_value("serial_num", "ES40EM00000"));
+	revision_number = myCfg->get_text_value("rev_number",
+		myCfg->get_text_value("rev_num", "0.0"));
 	read_only = myCfg->get_bool_value("read_only");
 	is_cdrom = myCfg->get_bool_value("cdrom");
 
