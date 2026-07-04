@@ -194,12 +194,14 @@ CConfigurator::CConfigurator(class CConfigurator* parent, char* name,
 		int state_start = 0;
 		int line = 1;
 		int col = 1;
+		bool line_has_content = false;
 		for (unsigned i = 0; i < textlen; i++, q++, col++)
 		{
 			if (*q == 0x0a)
 			{
 				line++;
 				col = 1;
+				line_has_content = false;
 			}
 
 			switch (state)
@@ -210,6 +212,7 @@ CConfigurator::CConfigurator(class CConfigurator* parent, char* name,
 				case '"':
 					state = STATE_STRING;
 					state_start = line;
+					line_has_content = true;
 					*p++ = *q;
 					break;
 
@@ -233,6 +236,7 @@ CConfigurator::CConfigurator(class CConfigurator* parent, char* name,
 
 				case '{':
 					cbrace++;
+					line_has_content = true;
 					*p++ = *q;
 					break;
 
@@ -241,13 +245,28 @@ CConfigurator::CConfigurator(class CConfigurator* parent, char* name,
 						FAILURE_2(Configuration,
 							"Too many closed braces at line %d, col %d", line, col);
 					cbrace--;
+					line_has_content = true;
 					*p++ = *q;
+					break;
+
+				case ';':
+					// A ';' as the first non-whitespace character of a line is
+					// an INI-style comment running to end of line. Elsewhere it
+					// keeps its meaning as the value terminator.
+					if (!line_has_content)
+					{
+						state = STATE_CC_COMMENT;
+						state_start = line;
+					}
+					else
+						*p++ = *q;
 					break;
 
 				default:
 					if (!isspace(*q))
 					{
-						if (isalnum(*q) || *q == '_' || *q == '.' || *q == '=' || *q == ';')
+						line_has_content = true;
+						if (isalnum(*q) || *q == '_' || *q == '.' || *q == '=')
 						{
 							*p++ = *q;
 						}

@@ -2248,6 +2248,7 @@
     <ClInclude Include="..\AliM1543C_pmu.h" />
     <ClInclude Include="..\AlphaCPU.h" />
     <ClInclude Include="..\attotime.h" />
+    <ClInclude Include="..\banner.h" />
     <ClInclude Include="..\base\Exception.h" />
     <ClInclude Include="..\base\Mutex.h" />
     <ClInclude Include="..\base\Platform_VMS.h" />
