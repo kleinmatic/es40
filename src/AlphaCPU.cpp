@@ -392,6 +392,8 @@ void CAlphaCPU::run()
 		// wrong cc_per_instruction (huge elapsed wall-time vs ~0 instructions).
 		start_time = std::chrono::steady_clock::now();
 		next_timer_fire = start_time;
+		tick_last_fire = start_time;
+		cc_last_sync = start_time;
 		cc_large = 0;
 		state.instruction_count = 0;
 		prev_icount = 0;
@@ -758,13 +760,19 @@ void CAlphaCPU::jit_run(int budget)
 	cc_last_sync += std::chrono::nanoseconds(g_diag_excluded_ns);   // keep device-diagnostic print stalls out of the RPCC (diag_rpcc.h)
 	g_diag_excluded_ns = 0;
 	if (cc_last_sync > now) cc_last_sync = now;   // a stall can't exceed the batch's real elapsed; never bill negative
-	const auto cc_delta = now - cc_last_sync;
+	auto cc_delta = now - cc_last_sync;
 	cc_last_sync = now;
 	// Wall-clock RPCC: advance the cycle counter by real elapsed time * cpu_hz (when enabled) so
-	// it tracks the configured CPU frequency no matter how fast/bursty the JIT runs 
-	// The <1s guard skips odd deltas (first call / reset / pause), like the timer catch-up below.
-	if (state.cc_ena && cc_delta < std::chrono::seconds(1))
+	// it tracks the configured CPU frequency no matter how fast/bursty the JIT runs.
+	// Cap (not drop) odd deltas at 1s: dropping made the cc run slow through early-boot
+	// device-init stalls, and SRM's cycles-per-tick calibration locked that in as a
+	// too-low CPU speed (the 357MHz bug).
+	if (state.cc_ena)
+	{
+		if (cc_delta > std::chrono::seconds(1))
+			cc_delta = std::chrono::seconds(1);
 		state.cc += (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(cc_delta).count() * cpu_hz / 1000000000ULL;
+	}
 
 	// Drive the Cchip interval timer once per dispatch batch (CPU0 only), not
 	// once per instruction the way the in-execute() poll did.
@@ -772,16 +780,28 @@ void CAlphaCPU::jit_run(int budget)
 	{
 		if (now >= next_timer_fire)
 		{
-			cSystem->interrupt(-1, true);
 			const u64 period_ns = theAli ? theAli->get_interval_period_ns() : 0;
 			if (period_ns)
 			{
-				next_timer_fire += std::chrono::nanoseconds(period_ns);
-				if (now - next_timer_fire > std::chrono::seconds(1))
-					next_timer_fire = now;
+				// Count-preserving, paced catch-up: the schedule advances one period per
+				// fire so ticks lost to a busy/stalled CPU0 thread are repaid and the
+				// guests' tick-counted clocks (VMS never resyncs) stay true to wall time.
+				// Repayment is paced to >= half a period between fires (max 2x nominal,
+				// never a burst - burst/compressed ticks skew RPCC-vs-tick calibrations).
+				// Backlog beyond 1s (debugger pause, host sleep) is dropped.
+				if (now - tick_last_fire >= std::chrono::nanoseconds(period_ns / 2))
+				{
+					cSystem->interrupt(-1, true);
+					tick_last_fire = now;
+					next_timer_fire += std::chrono::nanoseconds(period_ns);
+					if (now - next_timer_fire > std::chrono::seconds(1))
+						next_timer_fire = now;
+				}
 			}
 			else
 			{
+				cSystem->interrupt(-1, true);
+				tick_last_fire = now;
 				next_timer_fire = now + std::chrono::seconds(1);
 			}
 		}
@@ -2105,25 +2125,54 @@ void CAlphaCPU::execute()
 #endif
 
 #ifndef ES40_JIT
-	// Poll the wall-clock Cchip interval timer once per execute() batch
-	// (~512 instructions) rather than every 32; 
-	if (state.iProcNum == 0)
 	{
 		const auto now = std::chrono::steady_clock::now();
-		if (now >= next_timer_fire)
+
+		// Wall-clock RPCC at batch granularity - same semantics as the JIT build. The
+		// old per-instruction advance ran at cc_per_instruction rate, which lags real
+		// time while the check_state feedback converges; SRM's cycles-per-tick speed
+		// calibration measured that lag consistently and locked in a low CPU speed.
+		if (cc_last_sync > now)
+			cc_last_sync = now;
+		auto cc_delta = now - cc_last_sync;
+		cc_last_sync = now;
+		if (state.cc_ena)
 		{
-			cSystem->interrupt(-1, true);
-			const u64 period_ns = theAli ? theAli->get_interval_period_ns() : 0;
-			if (period_ns)
+			if (cc_delta > std::chrono::seconds(1))
+				cc_delta = std::chrono::seconds(1);
+			state.cc += (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(cc_delta).count() * cpu_hz / 1000000000ULL;
+		}
+
+		// Poll the wall-clock Cchip interval timer once per execute() batch
+		// (~512 instructions) rather than every 32;
+		if (state.iProcNum == 0)
+		{
+			if (now >= next_timer_fire)
 			{
-				next_timer_fire += std::chrono::nanoseconds(period_ns);
-				// Cap catchup to 1 wall-second after a long stall.
-				if (now - next_timer_fire > std::chrono::seconds(1))
-					next_timer_fire = now;
-			}
-			else
-			{
-				next_timer_fire = now + std::chrono::seconds(1);
+				const u64 period_ns = theAli ? theAli->get_interval_period_ns() : 0;
+				if (period_ns)
+				{
+					// Count-preserving, paced catch-up: the schedule advances one period per
+					// fire so ticks lost to a busy/stalled CPU0 thread are repaid and the
+					// guests' tick-counted clocks (VMS never resyncs) stay true to wall time.
+					// Repayment is paced to >= half a period between fires (max 2x nominal,
+					// never a burst - burst/compressed ticks skew RPCC-vs-tick calibrations).
+					// Backlog beyond 1s (debugger pause, host sleep) is dropped.
+					if (now - tick_last_fire >= std::chrono::nanoseconds(period_ns / 2))
+					{
+						cSystem->interrupt(-1, true);
+						tick_last_fire = now;
+						next_timer_fire += std::chrono::nanoseconds(period_ns);
+						if (now - next_timer_fire > std::chrono::seconds(1))
+							next_timer_fire = now;
+					}
+				}
+				else
+				{
+					cSystem->interrupt(-1, true);
+					tick_last_fire = now;
+					next_timer_fire = now + std::chrono::seconds(1);
+				}
 			}
 		}
 	}
@@ -2131,11 +2180,11 @@ void CAlphaCPU::execute()
 _next_instruction:
 	if (--_batch_budget <= 0)
 	{
-		// Flush remaining accumulated counters before returning
+		// Flush remaining accumulated counters before returning. state.cc is wall-clock
+		// (advanced at batch top); _cc_accum only feeds cc_large for the legacy
+		// check_state speed-factor feedback.
 		state.instruction_count += _icount_accum;
 		cc_large += _cc_accum;
-		if (state.cc_ena)
-			state.cc += _cc_accum;
 		return;
 	}
 #endif
@@ -2261,12 +2310,11 @@ _next_instruction:
 
 		if ((_batch_budget & 31) == 0)
 		{
-			// Flush accumulated counters to state
+			// Flush accumulated counters to state. state.cc is wall-clock (batch top);
+			// _cc_accum only feeds cc_large for the check_state speed-factor feedback.
 			state.instruction_count += _icount_accum;
 			_icount_accum = 0;
 			cc_large += _cc_accum;
-			if (state.cc_ena)
-				state.cc += _cc_accum;
 			_cc_accum = 0;
 
 			// There are one or more active delayed irq_h interrupts. Go through the 6

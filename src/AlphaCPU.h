@@ -444,8 +444,11 @@ private:
 
   // Wall-clock-paced Cchip interval timer (b_irq<2>).  CPU 0 fires once
   // per period as it passes batch-flush boundaries.  Avoids cross-thread
-  // edge coalescing seen with AliM1543C-thread firing.
+  // edge coalescing seen with AliM1543C-thread firing.  next_timer_fire is
+  // the count-preserving schedule (+= period per fire); tick_last_fire paces
+  // catch-up so backlog repays at no more than 2x the nominal rate.
   std::chrono::steady_clock::time_point next_timer_fire;
+  std::chrono::steady_clock::time_point tick_last_fire;
 
   // Wall-clock RPCC: state.cc advances by real elapsed time * cpu_hz so it tracks the configured
   // CPU frequency regardless of how fast/bursty the JIT runs. This is the last sync timestamp;
