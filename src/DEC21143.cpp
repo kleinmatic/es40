@@ -331,33 +331,40 @@ void CDEC21143::run()
 		{
 			if (StopThread)
 				return;
-			receive_process();
 
-			bool  asserted;
-
-			if ((state.reg[CSR_OPMODE / 8] & OPMODE_ST))
-				while (dec21143_tx());
-
-			/* Normal and Abnormal interrupt summary (align with 21143/QEMU). */
+			// Hold the register lock for the whole work batch: the CPU thread
+			// mutates CSRs/rx_queue via WriteMem_Bar concurrently.
 			{
-				u32 ie = state.reg[CSR_STATUS / 8] & state.reg[CSR_INTEN / 8];
-				state.reg[CSR_STATUS / 8] &= ~(STATUS_NIS | STATUS_AIS);
-				/* NIS if any normal event is enabled + set */
-				if (ie & (STATUS_TI | STATUS_TU | STATUS_RI | STATUS_TM | STATUS_ER))
-					state.reg[CSR_STATUS / 8] |= STATUS_NIS;
-				/* AIS if any abnormal event is enabled + set */
-				if (ie & (STATUS_LC | STATUS_GPPI | STATUS_SE | STATUS_LNF | STATUS_ETI |
-					STATUS_RWT | STATUS_RPS | STATUS_RU | STATUS_UNF | STATUS_LNPANC |
-					STATUS_TJT | STATUS_TPS))
-					state.reg[CSR_STATUS / 8] |= STATUS_AIS;
-				asserted = (state.reg[CSR_STATUS / 8] & state.reg[CSR_INTEN / 8] &
-					(STATUS_AIS | STATUS_NIS)) != 0;
-			}
+				SCOPED_M_LOCK(myRegLock);
 
-			if (asserted != state.irq_was_asserted)
-			{
-				if (do_pci_interrupt(0, asserted))
-					state.irq_was_asserted = asserted;
+				receive_process();
+
+				bool  asserted;
+
+				if ((state.reg[CSR_OPMODE / 8] & OPMODE_ST))
+					while (dec21143_tx());
+
+				/* Normal and Abnormal interrupt summary (align with 21143/QEMU). */
+				{
+					u32 ie = state.reg[CSR_STATUS / 8] & state.reg[CSR_INTEN / 8];
+					state.reg[CSR_STATUS / 8] &= ~(STATUS_NIS | STATUS_AIS);
+					/* NIS if any normal event is enabled + set */
+					if (ie & (STATUS_TI | STATUS_TU | STATUS_RI | STATUS_TM | STATUS_ER))
+						state.reg[CSR_STATUS / 8] |= STATUS_NIS;
+					/* AIS if any abnormal event is enabled + set */
+					if (ie & (STATUS_LC | STATUS_GPPI | STATUS_SE | STATUS_LNF | STATUS_ETI |
+						STATUS_RWT | STATUS_RPS | STATUS_RU | STATUS_UNF | STATUS_LNPANC |
+						STATUS_TJT | STATUS_TPS))
+						state.reg[CSR_STATUS / 8] |= STATUS_AIS;
+					asserted = (state.reg[CSR_STATUS / 8] & state.reg[CSR_INTEN / 8] &
+						(STATUS_AIS | STATUS_NIS)) != 0;
+				}
+
+				if (asserted != state.irq_was_asserted)
+				{
+					if (do_pci_interrupt(0, asserted))
+						state.irq_was_asserted = asserted;
+				}
 			}
 
 			mySemaphore.tryWait(10);
@@ -661,6 +668,8 @@ void CDEC21143::init()
 	state.tx.cur_buf = (unsigned char*)malloc(2048);
 	state.irq_was_asserted = false;
 
+	myRegLock = new CMutex("nic-reg");
+
 	ResetPCI();
 	ResetNIC();   // explicit one-shot internal reset; previously implicit via ResetPCI
 
@@ -719,7 +728,12 @@ u32 CDEC21143::ReadMem_Bar(int func, int bar, u32 address, int dsize)
 	{
 	case 0: // CBIO
 	case 1: // CBMA
-		return nic_read(address, dsize);
+		{
+			// CSR reads can mutate state (SROM/MII state machines) — serialize
+			// against the NIC thread.
+			SCOPED_M_LOCK(myRegLock);
+			return nic_read(address, dsize);
+		}
 	}
 
 	printf("21143: ReadMem_Bar: unsupported bar %d\n", bar);
@@ -732,8 +746,11 @@ void CDEC21143::WriteMem_Bar(int func, int bar, u32 address, int dsize, u32 data
 	{
 	case 0: // CBIO
 	case 1: // CBMA
-		nic_write(address, dsize, (u32)endian_bits(data, dsize));
-		return;
+		{
+			SCOPED_M_LOCK(myRegLock);
+			nic_write(address, dsize, (u32)endian_bits(data, dsize));
+			return;
+		}
 	}
 
 	printf("21143: WriteMem_Bar: unsupported bar %d\n", bar);
@@ -2281,6 +2298,8 @@ int CDEC21143::SaveState(FILE* f)
 	long  ss = sizeof(state);
 	int   res;
 
+	SCOPED_M_LOCK(myRegLock);
+
 	if ((res = CPCIDevice::SaveState(f)))
 		return res;
 
@@ -2302,6 +2321,8 @@ int CDEC21143::RestoreState(FILE* f)
 	u32     m2;
 	int     res;
 	size_t  r;
+
+	SCOPED_M_LOCK(myRegLock);
 
 	if ((res = CPCIDevice::RestoreState(f)))
 		return res;
