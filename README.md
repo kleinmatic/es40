@@ -13,6 +13,8 @@ Latest 2017-2026 x64 redistributable is recommended. At minimum the version
 matching your build toolchain is needed.   
 
 # Please use es40-cfg to generate a config the first time you use it to ensure you do not omit any required devices from the chipset.  
+
+### Reference src\es40.cfg for configuration values and explanations
   
 # Live shot of X11 running on emulated S3 via SDL display!  
   

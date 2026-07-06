@@ -652,7 +652,7 @@ void CDEC21143::init()
 	}
 
 	rx_queue = new CPacketQueue("rx_queue",
-		(int)myCfg->get_num_value("queue", false, 100));
+		(int)myCfg->get_num_value("queue", false, 1024));
 	calc_crc = myCfg->get_bool_value("crc", false);
 	trace_packets = myCfg->get_bool_value("trace_packets", false);
 
