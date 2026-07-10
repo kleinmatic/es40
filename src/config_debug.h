@@ -158,6 +158,10 @@
 // Define if you want to enable unaligned access debugging
 //#define DEBUG_UNALIGN
 
+// Define for a periodic per-CPU pc/icount dump on stderr (hang triage:
+// icount advancing = guest/CPU livelock, frozen = host deadlock)
+#define DEBUG_HANG_SAMPLER
+
 // Define if you want to enable SuperIO debugging
 //#define DEBUG_SUPERIO
 

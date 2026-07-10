@@ -733,7 +733,16 @@ jobs:
             CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-fpermissive -std=c++17" \
             CPPFLAGS="-I$PWD/src/emu" \
             PKG_CONFIG_PATH="$PWD/.github/pkgconfig:/usr/local/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
-            ./configure --enable-asmjit
+            ./configure --enable-asmjit --enable-pcap
+
+          if ! grep -q -- '-DHAVE_PCAP' src/Makefile; then
+            echo "The macOS x86-64 JIT build was configured without pcap support."
+            exit 1
+          fi
+          if ! grep -q -- '-lpcap' src/Makefile; then
+            echo "The macOS x86-64 JIT build was configured without linking libpcap."
+            exit 1
+          fi
 
       - name: Build macOS x86-64 JIT validation target
         run: |
