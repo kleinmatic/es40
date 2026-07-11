@@ -198,7 +198,6 @@ private:
   CThread* myThread;
   bool                StopThread;
   CSemaphore          mySemaphore;
-  CMutex* myRegLock;  /**< serializes NIC thread vs CPU-thread CSR access */
 
   u32                 nic_read(u32 address, int dsize);
   void                nic_write(u32 address, int dsize, u32 data);
