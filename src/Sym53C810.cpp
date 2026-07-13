@@ -522,20 +522,18 @@ void CSym53C810::run()
 			mySemaphore.wait();
 			if (StopThread)
 				return;
-			state.insn_processed = 0;   // fresh budget per SCRIPTS wake
-			while (state.executing)
+			bool fresh_wake = true;
+			for (;;)
 			{
-				myRegLock->lock();
-				try
+				CScopedLock<CMutex> regLock(myRegLock);
+				if (fresh_wake)
 				{
-					execute();
+					state.insn_processed = 0;
+					fresh_wake = false;
 				}
-				catch (...)
-				{
-					MUTEX_UNLOCK(myRegLock);
-					throw;
-				}
-				MUTEX_UNLOCK(myRegLock);
+				if (!state.executing)
+					break;
+				execute();
 			}
 		}
 	}
@@ -632,15 +630,30 @@ CSym53C810::~CSym53C810()
 /**
  * Reset the chipset.
  *
- * Initialize all registers to their default values.
+ * Initialize controller state and registers to their reset values.
  **/
 void CSym53C810::chip_reset()
 {
+	// SCRIPTS bookkeeping lives outside the register array and must not
+	// survive either power-on initialization or an ISTAT software reset.
 	state.executing = false;
 	state.wait_reselect = false;
-	state.irq_asserted = false;
+	state.select_timeout = false;
+	state.disconnected = 0;
+	state.wait_jump = 0;
+	state.alu.carry = false;
+	state.dstat_stack = 0;
+	state.sist0_stack = 0;
+	state.sist1_stack = 0;
 	state.gen_timer = 0;
 	state.insn_processed = 0;
+	state.scsi_phase = SCSI_PHASE_FREE;
+	state.status = 0;
+	memset(state.msg, 0, sizeof(state.msg));
+	state.msg_len = 0;
+	state.msg_action = 0;
+	state.current_lun = 0;
+	state.command_complete = 0;
 	memset(state.regs.reg32, 0, sizeof(state.regs.reg32));
 	R8(SCNTL0) = R_SCNTL0_ARB1 | R_SCNTL0_ARB0; // 810
 	R8(DSTAT) = R_DSTAT_DFE;    // DMA FIFO empty // 810
@@ -652,6 +665,10 @@ void CSym53C810::chip_reset()
 	R8(MACNTL) = 0x40;  // 810 type ID
 	R8(GPCNTL) = 0x0F;  // 810
 	R8(STEST0) = 0x03;  // 810
+
+	// Reset clears the controller's interrupt state, including its PCI pin.
+	do_pci_interrupt(0, false);
+	state.irq_asserted = false;
 }
 
 /**
@@ -929,16 +946,26 @@ void CSym53C810::WriteMem_Bar(int func, int bar, u32 address, int dsize, u32 dat
 			break;
 
 		case 16:
+		{
+			// A word write is one PCI transaction. Keep SCRIPTS from
+			// observing the register file between its byte lanes.
+			CScopedLock<CMutex> regLock(myRegLock);
 			WriteMem_Bar(0, 1, address + 0, 8, (data >> 0) & 0xff);
 			WriteMem_Bar(0, 1, address + 1, 8, (data >> 8) & 0xff);
 			break;
+		}
 
 		case 32:
+		{
+			// A dword write is one PCI transaction. In particular, DSP must
+			// not start SCRIPTS until all four bytes have been committed.
+			CScopedLock<CMutex> regLock(myRegLock);
 			WriteMem_Bar(0, 1, address + 0, 8, (data >> 0) & 0xff);
 			WriteMem_Bar(0, 1, address + 1, 8, (data >> 8) & 0xff);
 			WriteMem_Bar(0, 1, address + 2, 8, (data >> 16) & 0xff);
 			WriteMem_Bar(0, 1, address + 3, 8, (data >> 24) & 0xff);
 			break;
+		}
 		}
 		break;
 
@@ -1128,16 +1155,25 @@ u32 CSym53C810::ReadMem_Bar(int func, int bar, u32 address, int dsize)
 			break;
 
 		case 16:
+		{
+			// Return one coherent register snapshot for a single PCI read.
+			CScopedLock<CMutex> regLock(myRegLock);
 			data = (ReadMem_Bar(0, 1, address + 0, 8) << 0) & 0x00ff;
 			data |= (ReadMem_Bar(0, 1, address + 1, 8) << 8) & 0xff00;
 			break;
+		}
 
 		case 32:
+		{
+			// SCRIPTS updates several dword registers while it runs; do not
+			// let those updates tear a guest dword read.
+			CScopedLock<CMutex> regLock(myRegLock);
 			data = (ReadMem_Bar(0, 1, address + 0, 8) << 0) & 0x000000ff;
 			data |= (ReadMem_Bar(0, 1, address + 1, 8) << 8) & 0x0000ff00;
 			data |= (ReadMem_Bar(0, 1, address + 2, 8) << 16) & 0x00ff0000;
 			data |= (ReadMem_Bar(0, 1, address + 3, 8) << 24) & 0xff000000;
 			break;
+		}
 		}
 		break;
 
