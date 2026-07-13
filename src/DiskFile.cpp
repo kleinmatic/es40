@@ -167,6 +167,9 @@ static void SDLCALL callback(void* userdata, const char* const* filelist,
     {
         SDL_Log("The user did not select any file.");
         return;
+    } else if (!**filelist) {
+        SDL_Log("The user selected an empty file.");
+        return;
     }
 
     if (cd_diskfiles.size() > 0)
