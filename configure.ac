@@ -50,6 +50,18 @@ AM_CONFIG_HEADER([src/config.h])
 AM_INIT_AUTOMAKE([foreign subdir-objects])
 AC_CANONICAL_HOST
 
+AC_ARG_VAR([ES40_GIT_COMMIT], [Git commit to embed in ES40 binaries])
+AS_IF([test -z "$ES40_GIT_COMMIT"], [
+  AS_IF([test -n "$GITHUB_SHA"], [
+    ES40_GIT_COMMIT="$GITHUB_SHA"
+  ], [
+    ES40_GIT_COMMIT=`git -C "$srcdir" rev-parse HEAD 2>/dev/null`
+  ])
+])
+AS_IF([test -z "$ES40_GIT_COMMIT"], [ES40_GIT_COMMIT=unknown])
+AC_DEFINE_UNQUOTED([ES40_GIT_COMMIT], ["$ES40_GIT_COMMIT"],
+  [Git commit from which this binary was built.])
+
 # Checks for programs.
 AC_PROG_CXX
 AC_PROG_CC

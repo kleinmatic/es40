@@ -200,6 +200,10 @@
 
 #include "lockstep.h"
 
+#if !defined(ES40_GIT_COMMIT)
+#define ES40_GIT_COMMIT "unknown"
+#endif
+
 #if defined(HAVE_SDL)
 #include "SDL3/SDL.h"
 #endif
@@ -274,6 +278,13 @@ void segv_handler(int signum)
  **/
 int main(int argc, char* argv[])
 {
+	if (argc == 2 &&
+		(strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-v") == 0))
+	{
+		printf("ES40 %s (GitHub commit %s)\n", VERSION, ES40_GIT_COMMIT);
+		return 0;
+	}
+
 	print_es40_banner("AlphaServer ES40 emulator");
 
 	const char* filename = 0;

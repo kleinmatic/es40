@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(ES40 LANGUAGES C CXX)
+project(ES40 VERSION 0.75.4 LANGUAGES C CXX)
 
 option(ES40_DISABLE_SDL "Disable SDL for headless builds" OFF)
 option(ES40_DISABLE_NETWORKING "Disable PCap/networking for networkless builds" OFF)
@@ -134,7 +134,6 @@ if (NOT WIN32)
     set(PACKAGE_BUGREPORT "\"https://github.com/ES40-Emu/es40/issues/new\"")
     string(TOLOWER ${PROJECT_NAME} PACKAGE_NAME_L)
     set(PACKAGE_NAME \"${PACKAGE_NAME_L}\")
-    set(PROJECT_VERSION 0.74)
     set(PACKAGE_VERSION \"${PROJECT_VERSION}\")
     set(PACKAGE_STRING "\"${PACKAGE_NAME_L} ${PROJECT_VERSION}\"")
     set(PACKAGE_TARNAME \"${PACKAGE_NAME_L}.tar.gz\")
@@ -204,6 +203,29 @@ set(ES40_SOURCES)
 set(ES40_INCLUDES)
 set(ES40_LIBRARIES)
 set(ES40_DEFINITIONS)
+
+set(ES40_GIT_COMMIT "" CACHE STRING "Git commit to embed in ES40 binaries")
+if (NOT ES40_GIT_COMMIT)
+    if (DEFINED ENV{GITHUB_SHA} AND NOT "$ENV{GITHUB_SHA}" STREQUAL "")
+        set(ES40_GIT_COMMIT "$ENV{GITHUB_SHA}")
+    else()
+        find_program(ES40_GIT_EXECUTABLE git)
+        if (ES40_GIT_EXECUTABLE)
+            execute_process(
+                COMMAND "${ES40_GIT_EXECUTABLE}" rev-parse HEAD
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                RESULT_VARIABLE ES40_GIT_RESULT
+                OUTPUT_VARIABLE ES40_GIT_COMMIT
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET
+            )
+        endif()
+    endif()
+endif()
+if (NOT ES40_GIT_COMMIT OR (DEFINED ES40_GIT_RESULT AND NOT ES40_GIT_RESULT EQUAL 0))
+    set(ES40_GIT_COMMIT "unknown")
+endif()
+list(APPEND ES40_DEFINITIONS "ES40_GIT_COMMIT=\"${ES40_GIT_COMMIT}\"")
 
 list(APPEND ES40_SOURCES
     src/base/Exception.cpp

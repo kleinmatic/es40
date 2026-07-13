@@ -405,9 +405,9 @@ jobs:
           
           if ($isNoNetwork -or $isNoScreen) {
             Write-Host "Building es40.vcxproj only for constrained configuration: $configuration"
-            msbuild "src/Visual Studio/es40.vcxproj" /m /p:Configuration="$configuration" /p:Platform="x64" /p:WindowsTargetPlatformVersion="10.0"
+            msbuild "src/Visual Studio/es40.vcxproj" /m /p:Configuration="$configuration" /p:Platform="x64" /p:WindowsTargetPlatformVersion="10.0" /p:ES40GitCommit="$env:GITHUB_SHA"
           } else {
-            msbuild "src/Visual Studio/es40.sln" /m /p:Configuration="$configuration" /p:Platform="x64" /p:WindowsTargetPlatformVersion="10.0"
+            msbuild "src/Visual Studio/es40.sln" /m /p:Configuration="$configuration" /p:Platform="x64" /p:WindowsTargetPlatformVersion="10.0" /p:ES40GitCommit="$env:GITHUB_SHA"
           }
 
       - name: Include SDL3 runtime with built binaries

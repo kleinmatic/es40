@@ -2183,6 +2183,9 @@
       <OutputFile>$(OutDir)es40.bsc</OutputFile>
     </Bscmake>
   </ItemDefinitionGroup>
+  <PropertyGroup>
+    <ES40GitCommit Condition="'$(ES40GitCommit)' == '' and '$(GITHUB_SHA)' != ''">$(GITHUB_SHA)</ES40GitCommit>
+  </PropertyGroup>
   <ItemGroup>
     <ClCompile Include="..\AliM1543C.cpp" />
     <ClCompile Include="..\AliM1543C_ide.cpp" />
@@ -2350,6 +2353,28 @@
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="SetES40GitCommit" BeforeTargets="ClCompile">
+    <Exec
+      Command="git -C &quot;$(ProjectDir)..\..&quot; rev-parse HEAD"
+      Condition="'$(ES40GitCommit)' == ''"
+      ConsoleToMSBuild="true"
+      IgnoreExitCode="true"
+      IgnoreStandardErrorWarningFormat="true"
+      StandardErrorImportance="Low"
+      StandardOutputImportance="Low">
+      <Output TaskParameter="ConsoleOutput" ItemName="_ES40GitOutput" />
+      <Output TaskParameter="ExitCode" PropertyName="_ES40GitExitCode" />
+    </Exec>
+    <PropertyGroup>
+      <ES40GitCommit Condition="'$(ES40GitCommit)' == '' and '$(_ES40GitExitCode)' == '0'">@(_ES40GitOutput)</ES40GitCommit>
+      <ES40GitCommit Condition="'$(ES40GitCommit)' == ''">unknown</ES40GitCommit>
+    </PropertyGroup>
+    <ItemGroup>
+      <ClCompile Update="@(ClCompile)">
+        <PreprocessorDefinitions>ES40_GIT_COMMIT=&quot;$(ES40GitCommit)&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      </ClCompile>
+    </ItemGroup>
+  </Target>
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 </Project>
