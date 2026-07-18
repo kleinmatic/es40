@@ -105,6 +105,9 @@ static void diag_printf(const char* fmt, ...)
 
 #define DEBUG_PCI 0
 
+#define PCI_MEM_TYPE_MASK 0x00000006U
+#define PCI_MEM_TYPE_64   0x00000004U
+
 static size_t pci_dma_chunk_limit(u64 phys_addr, size_t remaining)
 {
 	const size_t dma_page = 8192;
@@ -236,7 +239,35 @@ void CPCIDevice::config_write(int func, u32 address, int dsize, u32 data)
 		break;
 	}
 
-	if (dsize == 32 && ((data & mask) != mask) && ((data & mask) != 0))
+	bool upper_64bit_bar = false;
+	if (dsize == 32 && address >= 0x14 && address <= 0x24)
+	{
+		const int bar = (address - 0x10) / 4;
+		const u32 attributes =
+			endian_32(std_config_data[func][4 + bar - 1]);
+		upper_64bit_bar = (attributes & 1U) == 0 &&
+			(attributes & PCI_MEM_TYPE_MASK) == PCI_MEM_TYPE_64;
+	}
+	const u32 access_bytes = (u32)dsize / 8U;
+	const bool rom_bar_write = address < 0x34U &&
+		address + access_bytes > 0x30U;
+	const u32 write_ones = dsize == 8 ? 0xFFU :
+		(dsize == 16 ? 0xFFFFU : 0xFFFFFFFFU);
+
+	/* Only an all-ones size probe leaves the active mapping unchanged. */
+	if (rom_bar_write && data != write_ones)
+	{
+		const u32 rom_data = endian_32(pci_state.config_data[func][0x30 / 4]);
+		const u32 rom_mask = endian_32(pci_state.config_mask[func][0x30 / 4]);
+		if (rom_mask != 0)
+			register_bar(func, 6, rom_data, rom_mask);
+	}
+	else if (dsize == 32 && upper_64bit_bar && ((data & mask) != mask))
+	{
+		register_bar(func, (address - 0x10) / 4,
+			endian_32(new_data), endian_32(mask));
+	}
+	else if (dsize == 32 && ((data & mask) != mask))
 	{
 		switch (address)
 		{
@@ -249,10 +280,6 @@ void CPCIDevice::config_write(int func, u32 address, int dsize, u32 data)
 			register_bar(func, (address - 0x10) / 4, endian_32(new_data),
 				endian_32(mask));
 			break;
-
-		case 0x30:
-			register_bar(func, 6, endian_32(new_data), endian_32(mask));
-			break;
 		}
 	}
 
@@ -261,6 +288,22 @@ void CPCIDevice::config_write(int func, u32 address, int dsize, u32 data)
 
 void CPCIDevice::register_bar(int func, int bar, u32 data, u32 mask)
 {
+	/* A 64-bit BAR's upper dword belongs to the preceding BAR. */
+	if (bar > 0 && bar < 6)
+	{
+		const u32 attributes =
+			endian_32(std_config_data[func][4 + bar - 1]);
+		if ((attributes & 1U) == 0 &&
+			(attributes & PCI_MEM_TYPE_MASK) == PCI_MEM_TYPE_64)
+		{
+			const u32 low =
+				endian_32(pci_state.config_data[func][4 + bar - 1]);
+			register_bar(func, bar - 1, low,
+				endian_32(pci_state.config_mask[func][4 + bar - 1]));
+			return;
+		}
+	}
+
 	int id = PCI_RANGE_BASE + (func * 8) + bar;
 
 	// IO BAR here, never BAR 6 though
@@ -271,6 +314,11 @@ void CPCIDevice::register_bar(int func, int bar, u32 data, u32 mask)
 		if (length < 4u) length = 4u;
 
 		u32 base = (data & PCI_IO_ADDRESS_MASK) & ~(length - 1u); //  IO BAR alignment  
+		if (base == 0)
+		{
+			cSystem->RegisterMemory(this, id, 0, 0);
+			return;
+		}
 
 		const u64 t = U64(0x00000801fc000000) + (U64(0x0000000200000000) * myPCIBus) + base;
 
@@ -288,6 +336,7 @@ void CPCIDevice::register_bar(int func, int bar, u32 data, u32 mask)
 		const bool rom_enable = (data & PCI_ROM_ADDRESS_ENABLE) != 0;
 
 		if (!rom_enable) {
+			cSystem->RegisterMemory(this, id, 0, 0);
 			printf("%s(%s).%d PCI BAR 6 ROM disabled.\n", myCfg->get_myName(), myCfg->get_myValue(), func);
 			return;
 		}
@@ -313,8 +362,29 @@ void CPCIDevice::register_bar(int func, int bar, u32 data, u32 mask)
 		u32 length = (~(mask & PCI_MEM_ADDRESS_MASK)) + 1u;
 		if (length < 0x10u) length = 0x10u; // spec minimum 16 bytes
 
-		// Base: clear attr bits, then align to size
-		u32 base = (data & PCI_MEM_ADDRESS_MASK) & ~(length - 1u);
+		const bool is_64bit = bar < 5 &&
+			(data & PCI_MEM_TYPE_MASK) == PCI_MEM_TYPE_64;
+		u32 high = 0;
+		if (is_64bit)
+		{
+			high = endian_32(pci_state.config_data[func][4 + bar + 1]);
+			pci_range_is_io[func][bar + 1] = false;
+
+			/* Ignore all-ones size probes on either half. */
+			if (high == 0xFFFFFFFFU ||
+				(data & PCI_MEM_ADDRESS_MASK) ==
+				(mask & PCI_MEM_ADDRESS_MASK))
+				return;
+		}
+
+		// Base: clear attribute bits, combine the pair, and align to size.
+		u64 base = ((u64)high << 32) | (data & PCI_MEM_ADDRESS_MASK);
+		base &= ~((u64)length - 1U);
+		if (base == 0)
+		{
+			cSystem->RegisterMemory(this, id, 0, 0);
+			return;
+		}
 
 		const u64 t = U64(0x0000080000000000) + (U64(0x0000000200000000) * myPCIBus) + base;
 
@@ -407,6 +477,9 @@ u64 CPCIDevice::ReadMem(int index, u64 address, int dsize)
 			myCfg->get_myName(), myCfg->get_myValue(), func);
 		return 0;
 	}
+
+	if (bar == 6)
+		cSystem->PrepareX86OptionROMMemory();
 
 	//  printf("%s(%s).%d Calling ReadMem_Bar(%d,%d).\n",myCfg->get_myName(), myCfg->get_myValue(), func,func,bar);
 	return ReadMem_Bar(func, bar, (u32)address, dsize);

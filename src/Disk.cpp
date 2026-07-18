@@ -127,6 +127,13 @@
 
 #include <vector>
 
+#define SCSI_MEDIA_STATE_STABLE             0
+#define SCSI_MEDIA_STATE_REMOVED            1
+#define SCSI_MEDIA_STATE_CHANGED           -1
+#define SCSI_MEDIA_STATE_RESET              2
+#define SCSI_MEDIA_STATE_RESET_REMOVED      3
+#define SCSI_MEDIA_STATE_RESET_CHANGED     -2
+
 extern std::vector<CDiskFile*> cd_diskfiles;
 
   /**
@@ -167,7 +174,7 @@ CDisk::CDisk(CConfigurator* cfg, CSystem* sys, CDiskController* ctrl,
 
 	state.block_size = is_cdrom ? 2048 : 512;
 	state.scsi.sense.available = false;
-	state.scsi.media_changed = 0;
+	state.scsi.media_changed = SCSI_MEDIA_STATE_STABLE;
 
 	myCtrl->register_disk(this, myBus, myDev);
 }
@@ -220,6 +227,18 @@ void CDisk::scsi_select_me(int bus)
 		scsi_set_phase(bus, SCSI_PHASE_COMMAND);
 	else
 		scsi_set_phase(bus, SCSI_PHASE_MSG_OUT);
+}
+
+/** Reset the target protocol state without changing the media. **/
+void CDisk::scsi_reset()
+{
+	const bool media_removed = state.scsi.media_changed == SCSI_MEDIA_STATE_REMOVED ||
+		state.scsi.media_changed == SCSI_MEDIA_STATE_RESET_REMOVED;
+	const bool media_changed = state.scsi.media_changed == SCSI_MEDIA_STATE_CHANGED ||
+		state.scsi.media_changed == SCSI_MEDIA_STATE_RESET_CHANGED;
+	memset(&state.scsi, 0, sizeof(state.scsi));
+	state.scsi.media_changed = media_removed ? SCSI_MEDIA_STATE_RESET_REMOVED :
+		(media_changed ? SCSI_MEDIA_STATE_RESET_CHANGED : SCSI_MEDIA_STATE_RESET);
 }
 
 static u32  disk_magic1 = 0xD15D15D1;
@@ -618,6 +637,7 @@ void CDisk::scsi_xfer_done_me(int bus)
 #define SCSI_MEDIA_CHANGE           - 5 /* Media changed */
 #define SCSI_MEDIA_REMOVED          - 6 /* Media removed */
 #define SCSI_INVALID_LUN            - 7 /* Invalid LUN */
+#define SCSI_RESET                  - 8 /* Power-on or bus/device reset */
 
 void CDisk::do_scsi_error(int errcode, int info)
 {
@@ -713,6 +733,15 @@ void CDisk::do_scsi_error(int errcode, int info)
 #if defined(DEBUG_SCSI)
 		printf("%s: Command returns check sense status (sense: SYSTEM RESOURCE FAILURE).\n",
 			devid_string);
+#endif
+		break;
+
+	case SCSI_RESET:
+		state.scsi.sense.data[2] = 0x06;   // unit attention
+		state.scsi.sense.data[12] = 0x29;  // power on, reset, or bus-device reset
+		state.scsi.sense.data[13] = 0x00;
+#if defined(DEBUG_SCSI)
+		printf("%s: Check sense: POWER ON OR RESET.\n", devid_string);
 #endif
 		break;
 	}
@@ -995,6 +1024,23 @@ int CDisk::do_scsi_command()
 	if (state.scsi.cmd.written < 1)
 		return 0;
 
+	/* INQUIRY and REQUEST SENSE do not consume a pending reset notification. */
+	if ((state.scsi.media_changed == SCSI_MEDIA_STATE_RESET ||
+		state.scsi.media_changed == SCSI_MEDIA_STATE_RESET_REMOVED ||
+		state.scsi.media_changed == SCSI_MEDIA_STATE_RESET_CHANGED) &&
+		state.scsi.cmd.data[0] != SCSICMD_INQUIRY &&
+		state.scsi.cmd.data[0] != SCSICMD_REQUEST_SENSE)
+	{
+		if (state.scsi.media_changed == SCSI_MEDIA_STATE_RESET_REMOVED)
+			state.scsi.media_changed = SCSI_MEDIA_STATE_REMOVED;
+		else if (state.scsi.media_changed == SCSI_MEDIA_STATE_RESET_CHANGED)
+			state.scsi.media_changed = SCSI_MEDIA_STATE_CHANGED;
+		else
+			state.scsi.media_changed = SCSI_MEDIA_STATE_STABLE;
+		do_scsi_error(SCSI_RESET);
+		return 0;
+	}
+
 	if (state.scsi.cmd.data[1] & 0xe0)
 	{
 #if defined(DEBUG_SCSI)
@@ -1020,14 +1066,14 @@ int CDisk::do_scsi_command()
 		// unit is always ready...
 		// ...unless it's a cdrom and the media was changed.
 		if (cdrom()) {
-			if (state.scsi.media_changed == 1) {
+			if (state.scsi.media_changed == SCSI_MEDIA_STATE_REMOVED) {
 				do_scsi_error(SCSI_MEDIA_REMOVED);
-				state.scsi.media_changed = -1;
+				state.scsi.media_changed = SCSI_MEDIA_STATE_CHANGED;
 				break;
 			}
-			else if (state.scsi.media_changed == -1) {
+			else if (state.scsi.media_changed == SCSI_MEDIA_STATE_CHANGED) {
 				do_scsi_error(SCSI_MEDIA_CHANGE);
-				state.scsi.media_changed = 0;
+				state.scsi.media_changed = SCSI_MEDIA_STATE_STABLE;
 				break;
 			}
 		}

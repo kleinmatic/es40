@@ -533,6 +533,8 @@ int CSystem::RegisterMemory(CSystemComponent* component, int index, u64 base,
 			return 0;
 		}
 	}
+	if (length == 0)
+		return 0;
 
 	CHECK_ALLOCATION(m = (struct SMemoryUser*)malloc(sizeof(struct SMemoryUser)));
 	m->component = component;
@@ -543,6 +545,99 @@ int CSystem::RegisterMemory(CSystemComponent* component, int index, u64 base,
 	asMemories[iNumMemories] = m;
 	iNumMemories++;
 	return 0;
+}
+
+/*
+ * AlphaBIOS does not create an EBDA.  Reserve one KiB at the conventional
+ * memory boundary before an x86 option ROM reads BAR6.
+ */
+void CSystem::PrepareX86OptionROMMemory()
+{
+	static const u64 BDA_EBDA_SEGMENT = U64(0x0000040e);
+	static const u64 BDA_MEMORY_SIZE = U64(0x00000413);
+	static const u64 BDA_TIMER_TICKS = U64(0x0000046c);
+	static const u32 ALPHABIOS_IVT_ENTRY = 0xfdec0008U;
+	static const u32 ALPHABIOS_IVT_08 = 0xfdec0020U;
+	static const u32 MAXIMUM_CONVENTIONAL_MEMORY_KB = 576U;
+	static const u32 MINIMUM_CONVENTIONAL_MEMORY_KB = 128U;
+	static const u32 EBDA_BLOCK_SIZE = 1024U;
+	static const u32 EBDA_SIZE_KB = 1U;
+
+	if (iNumMemoryBits < 20 ||
+		ReadMem(0x0000, 32, nullptr) != ALPHABIOS_IVT_ENTRY ||
+		ReadMem(0x0004, 32, nullptr) != ALPHABIOS_IVT_ENTRY ||
+		ReadMem(0x0020, 32, nullptr) != ALPHABIOS_IVT_08)
+		return;
+
+	u32 conventional_memory_kb =
+		(u32)ReadMem(BDA_MEMORY_SIZE, 16, nullptr);
+	if (conventional_memory_kb < MINIMUM_CONVENTIONAL_MEMORY_KB ||
+		conventional_memory_kb > MAXIMUM_CONVENTIONAL_MEMORY_KB)
+		return;
+
+	if (ReadMem(BDA_EBDA_SEGMENT, 16, nullptr) == 0)
+	{
+		const u64 ebda_address = (u64)conventional_memory_kb * 1024U;
+		for (u64 address = ebda_address;
+			address < ebda_address + EBDA_BLOCK_SIZE;
+			++address)
+		{
+			if (ReadMem(address, 8, nullptr) != 0)
+				return;
+		}
+
+		WriteMem(BDA_EBDA_SEGMENT, 16, ebda_address >> 4, nullptr);
+		WriteMem(ebda_address, 8, EBDA_SIZE_KB, nullptr);
+	}
+
+	if (!m_x86_bios_clock_active.load(std::memory_order_acquire))
+	{
+		m_x86_bios_clock_initial_ticks =
+			(u32)ReadMem(BDA_TIMER_TICKS, 32, nullptr);
+		m_x86_bios_clock_elapsed_ticks = 0;
+		m_x86_bios_clock_epoch = std::chrono::steady_clock::now();
+		m_x86_bios_clock_active.store(true, std::memory_order_release);
+	}
+}
+
+/* AlphaBIOS's x86 interpreter does not advance the 18.2 Hz BDA clock. */
+void CSystem::UpdateX86BIOSClock()
+{
+	static const u64 BDA_TIMER_TICKS = U64(0x0000046c);
+	static const u64 BDA_TIMER_ROLLOVER = U64(0x00000470);
+	static const u32 ALPHABIOS_IVT_ENTRY = 0xfdec0008U;
+	static const u32 BIOS_TICKS_PER_DAY = 0x001800b0U;
+
+	if (!m_x86_bios_clock_active.load(std::memory_order_acquire))
+		return;
+
+	const u64 elapsed_ms = (u64)std::chrono::duration_cast<
+		std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+			m_x86_bios_clock_epoch).count();
+	const u64 elapsed_ticks = elapsed_ms * 182U / 10000U;
+	if (elapsed_ticks == m_x86_bios_clock_elapsed_ticks)
+		return;
+
+	if (ReadMem(0x0000, 32, nullptr) != ALPHABIOS_IVT_ENTRY ||
+		ReadMem(0x0004, 32, nullptr) != ALPHABIOS_IVT_ENTRY)
+	{
+		m_x86_bios_clock_active.store(false, std::memory_order_release);
+		return;
+	}
+
+	const u64 previous_ticks = m_x86_bios_clock_initial_ticks +
+		m_x86_bios_clock_elapsed_ticks;
+	const u64 current_ticks = m_x86_bios_clock_initial_ticks + elapsed_ticks;
+	WriteMem(BDA_TIMER_TICKS, 32, current_ticks % BIOS_TICKS_PER_DAY, nullptr);
+
+	const u64 rollovers = current_ticks / BIOS_TICKS_PER_DAY -
+		previous_ticks / BIOS_TICKS_PER_DAY;
+	if (rollovers != 0)
+	{
+		const u32 rollover = (u32)ReadMem(BDA_TIMER_ROLLOVER, 8, nullptr);
+		WriteMem(BDA_TIMER_ROLLOVER, 8, rollover + rollovers, nullptr);
+	}
+	m_x86_bios_clock_elapsed_ticks = elapsed_ticks;
 }
 
 int got_sigint = 0;
@@ -592,6 +687,7 @@ void CSystem::Run()
 
 
 		CThread::sleep(100); // 100ms sleep
+		UpdateX86BIOSClock();
 		for (i = 0; i < iNumComponents; i++)
 			acComponents[i]->check_state();
 #if !defined(HIDE_COUNTER)
@@ -651,6 +747,7 @@ bool CSystem::ProcessPendingReset()
 void CSystem::ResetChipsetState()
 {
 	// Re-establish the same power-on defaults used in the constructor.
+	m_x86_bios_clock_active.store(false, std::memory_order_release);
 	state.cpu_lock_flags = 0;
 	memset(state.cpu_lock_address, 0, sizeof(state.cpu_lock_address));
 	memset(cpu_lock_value, 0, sizeof(cpu_lock_value));

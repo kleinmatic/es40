@@ -147,6 +147,7 @@
 #if defined(HAVE_PCAP)
 #include "DEC21143.h"
 #endif
+#include "LSI53C1020.h"
 #include "Sym53C895.h"
 #include "Sym53C810.h"
 #include "ES1370.h"
@@ -724,6 +725,7 @@ static const char* const kv_serial[] = {
 static const char* const kv_ali[] = { "vga_console", "lpt.outfile", 0 };
 static const char* const kv_ali_ide[] = { "dma", 0 };
 static const char* const kv_vga[] = { "rom", 0 };
+static const char* const kv_lsi53c1020[] = { "flash", "rom", "firmware", 0 };
 static const char* const kv_dec21143[] = {
   "adapter", "mac", "queue", "crc", "trace_packets", 0 };
 static const char* const kv_disk_file[] = {
@@ -754,6 +756,7 @@ classinfo classes[] = {
   {"s3", c_s3, IS_PCI | ON_GUI, kv_vga},
   //{"cirrus", c_cirrus, IS_PCI | ON_GUI, kv_vga},
   {"dec21143", c_dec21143, IS_PCI | IS_NIC, kv_dec21143},
+  {"lsi53c1020", c_lsi53c1020, IS_PCI | HAS_DISK, kv_lsi53c1020},
   {"sym53c895", c_sym53c895, IS_PCI | HAS_DISK, kv_none},
   {"sym53c810", c_sym53c810, IS_PCI | HAS_DISK, kv_none},
   {"floppy", c_floppy, ON_CS | HAS_DISK, kv_none},
@@ -1016,6 +1019,15 @@ void CConfigurator::initialize()
 			pcidev);
 		break;
 #endif
+
+	case c_lsi53c1020:
+		/* For disk controllers, myDevice points to the
+		 * CDiskController part of the class as it's used
+		 * to register disks to.
+		 */
+		myDevice = (CDiskController*) new CLSI53C1020(this,
+			(CSystem*)pParent->get_device(), pcibus, pcidev);
+		break;
 
 	case c_sym53c895:
 		/* For disk controllers, myDevice points to the

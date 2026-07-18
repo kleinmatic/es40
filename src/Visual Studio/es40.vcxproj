@@ -2236,6 +2236,7 @@
     <ClCompile Include="..\gui\sdl.cpp" />
     <ClCompile Include="..\Serial.cpp" />
     <ClCompile Include="..\StdAfx.cpp" />
+    <ClCompile Include="..\LSI53C1020.cpp" />
     <ClCompile Include="..\Sym53C810.cpp" />
     <ClCompile Include="..\Sym53C895.cpp" />
     <ClCompile Include="..\System.cpp" />
@@ -2320,6 +2321,7 @@
     <ClInclude Include="..\gui\sdlkeys.h" />
     <ClInclude Include="..\Serial.h" />
     <ClInclude Include="..\StdAfx.h" />
+    <ClInclude Include="..\LSI53C1020.h" />
     <ClInclude Include="..\Sym53C810.h" />
     <ClInclude Include="..\Sym53C895.h" />
     <ClInclude Include="..\System.h" />

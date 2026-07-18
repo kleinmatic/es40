@@ -84,6 +84,7 @@ es40_SOURCES = AliM1543C.cpp \
        SCSIDevice.cpp \
        Serial.cpp \
        StdAfx.cpp \
+       LSI53C1020.cpp \
        Sym53C810.cpp \
        Sym53C895.cpp \
        SystemComponent.cpp \

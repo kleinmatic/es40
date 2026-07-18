@@ -276,6 +276,10 @@ bool  pic_messages = false;
 
 /* Timer Calibration: Instructions per Microsecond (assuming 1 clock = 1 instruction) */
 #define IPus  847
+#define REFRESH_TOGGLE_NS 15085ULL
+#define PIT_CLOCK_HZ      1193182ULL
+#define PIT_LATCH_VALID     0x00010000U
+#define PIT_LATCH_HIGH_NEXT 0x00020000U
 
 u32   ali_cfg_data[64] = {
 	/*00*/ 0x153310b9,  // CFID: vendor + device
@@ -682,40 +686,17 @@ void CAliM1543C::WriteMem_Legacy(int index, u32 address, int dsize, u32 data)
 	}
 }
 
-/**
- * Read port 61h (speaker/ miscellaneous).
- *
- * BDW:
- * This may need some expansion to help with timer delays.  It looks like
- * the 8254 flips bits on occasion, and the linux kernel (at least) uses
- *   do {
- *     count++;
- *   } while ((inb(0x61) & 0x20) == 0 && count < TIMEOUT_COUNT);
- * to calibrate the cpu clock.
- *
- * Every 1500 reads the bit gets flipped so maybe the timing will
- * seem reasonable to the OS.
- */
+/** Read port 61h: bit 4 is refresh and bit 5 is the PIT 2 output. */
 u8 CAliM1543C::reg_61_read()
 {
-#if 0
-	static long read_count = 0;
-	if (!(state.reg_61 & 0x20))
-	{
-		if (read_count % 1500 == 0)
-			state.reg_61 |= 0x20;
-	}
-	else
-	{
-		state.reg_61 &= ~0x20;
-	}
+	const u64 refresh_ns = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count();
 
-	read_count++;
-#else
-	state.reg_61 &= ~0x20;
-	if (pit_out(2))     // analytic ch2 phase: pollers see jitter-free edges
+	state.reg_61 &= ~0x30;
+	if ((refresh_ns / REFRESH_TOGGLE_NS) & 1U)
+		state.reg_61 |= 0x10;
+	if (pit_out(2))
 		state.reg_61 |= 0x20;
-#endif
 	return state.reg_61;
 }
 
@@ -724,7 +705,30 @@ u8 CAliM1543C::reg_61_read()
  **/
 void CAliM1543C::reg_61_write(u8 data)
 {
+	const bool gate_was_high = (state.reg_61 & 0x01) != 0;
+	const bool gate_is_high = (data & 0x01) != 0;
 	state.reg_61 = (state.reg_61 & 0xf0) | (((u8)data) & 0x0f);
+	const int mode = (state.pit_status[2] & 0x0e) >> 1;
+	if (gate_was_high && !gate_is_high && mode != 0)
+		state.pit_status[2] |= 0x80;
+	if (!gate_was_high && gate_is_high)
+	{
+		const auto now = std::chrono::steady_clock::now();
+		if (mode == 2 || mode == 3)
+		{
+			state.pit_counter[2] = state.pit_counter[2 + PIT_OFFSET_MAX];
+			state.pit_status[2] |= 0x80;
+			m_pit_epoch[2] = now;
+		}
+		else if (mode == 0 && state.pit_counter[2] != 0)
+		{
+			const u32 reload = state.pit_counter[2 + PIT_OFFSET_MAX];
+			const u32 elapsed = reload > state.pit_counter[2] ?
+				reload - state.pit_counter[2] : 0;
+			m_pit_epoch[2] = now - std::chrono::microseconds(
+				(u64)elapsed * 1000000ULL / PIT_CLOCK_HZ);
+		}
+	}
 }
 
 void CAliM1543C::superio_reset()
@@ -1416,11 +1420,38 @@ void CAliM1543C::toy_write(u32 address, u8 data)
  **/
 u8 CAliM1543C::pit_read(u32 address)
 {
+	if (address >= 3)
+		return 0;
 
-	//printf("PIT Read: %02" PRIx64 " \n",address);
-	u8  data;
-	data = 0;
-	return data;
+	u32& latch = state.pit_counter[address + PIT_OFFSET_LATCH];
+	const bool latched = (latch & PIT_LATCH_VALID) != 0;
+	const u16 count = (u16)(latched ? latch : state.pit_counter[address]);
+	const int access = (state.pit_status[address] & 0x30) >> 4;
+
+	switch (access)
+	{
+	case 1:                         // low byte only
+		if (latched)
+			latch = 0;
+		return (u8)count;
+
+	case 2:                         // high byte only
+		if (latched)
+			latch = 0;
+		return (u8)(count >> 8);
+
+	case 3:                         // low byte followed by high byte
+		if ((latch & PIT_LATCH_HIGH_NEXT) == 0)
+		{
+			/* Hold the count until its high byte is read. */
+			latch = (u32)count | PIT_LATCH_VALID | PIT_LATCH_HIGH_NEXT;
+			return (u8)count;
+		}
+		latch = 0;
+		return (u8)(count >> 8);
+	}
+
+	return 0;
 }
 
 /**
@@ -1428,64 +1459,79 @@ u8 CAliM1543C::pit_read(u32 address)
  **/
 void CAliM1543C::pit_write(u32 address, u8 data)
 {
-
-	//printf("PIT Write: %02" PRIx64 ", %02x \n",address,data);
 	if (address == 3)
-	{ // control
-		if (data != 0)
+	{
+		const int counter = (data >> 6) & 3;
+		if (counter == 3)
 		{
-			state.pit_status[address] = data; // last command seen.
-			if ((data & 0xc0) >> 6 != 3)
-			{
-				state.pit_status[(data & 0xc0) >> 6] = data & 0x3f;
-				state.pit_mode[(data & 0xc0) >> 6] = (data & 0x30) >> 4;
-			}
-			else
-			{ // readback command 8254 only
-				state.pit_status[address] = 0xc0; // bogus :)
-			}
+			state.pit_status[3] = data;
+			return;
 		}
-	}
-	else
-	{ // a counter
-		m_pit_epoch[address] = std::chrono::steady_clock::now();   // pit_out phase reference
-		switch (state.pit_mode[address])
+
+		const int access = (data >> 4) & 3;
+		if (access == 0)
 		{
-		case 0:
+			/* Do not replace an unread latch. */
+			u32& latch = state.pit_counter[counter + PIT_OFFSET_LATCH];
+			if ((latch & PIT_LATCH_VALID) == 0)
+				latch = (state.pit_counter[counter] & 0xFFFFU) | PIT_LATCH_VALID;
+			return;
+		}
+
+		int mode = (data >> 1) & 7;
+		if (mode >= 6)
+			mode -= 4;
+		state.pit_status[counter] = (u8)((data & 0x31) | (mode << 1) | 0x40);
+		if (mode != 0)
+			state.pit_status[counter] |= 0x80;
+		state.pit_mode[counter] = (u8)access;
+		state.pit_counter[counter + PIT_OFFSET_LATCH] = 0;
+		return;
+	}
+
+	if (address < 3)
+	{
+		const int access = (state.pit_status[address] & 0x30) >> 4;
+		u32 count = 0;
+		switch (access)
+		{
+		case 1:                       // low byte only
+			count = data;
 			break;
 
-		case 1:
-		case 3:
-			state.pit_counter[address] = (state.pit_counter[address] & 0xff) |
-				data <<
-				8;
-			state.pit_counter[address + PIT_OFFSET_MAX] = state.pit_counter[address];
+		case 2:                       // high byte only
+			count = (u32)data << 8;
+			break;
+
+		case 3:                       // low byte followed by high byte
 			if (state.pit_mode[address] == 3)
 			{
+				state.pit_counter[address + PIT_OFFSET_LATCH] = data;
 				state.pit_mode[address] = 2;
+				return;
 			}
-			else
-				state.pit_status[address] &= ~0xc0; // no longer high, counter valid.
+			count = (state.pit_counter[address + PIT_OFFSET_LATCH] & 0xFFU) |
+				((u32)data << 8);
+			state.pit_mode[address] = 3;
 			break;
 
-		case 2:
-			state.pit_counter[address] = (state.pit_counter[address] & 0xff00) | data;
-
-			// two bytes were written with 0x00, so its really 0x10000
-			if ((state.pit_status[address] & 0x30) >> 4 == 3
-				&& state.pit_counter[address] == 0)
-			{
-				state.pit_counter[address] = 65536;
-			}
-
-			state.pit_counter[address + PIT_OFFSET_MAX] = state.pit_counter[address];
-			state.pit_status[address] &= ~0xc0;   // no longer high, counter valid.
-			break;
+		default:
+			return;
 		}
+
+		if (count == 0)
+			count = 65536;
+		state.pit_counter[address] = count;
+		state.pit_counter[address + PIT_OFFSET_MAX] = count;
+		state.pit_counter[address + PIT_OFFSET_LATCH] = 0;
+		state.pit_status[address] &= ~0x40;
+		if (((state.pit_status[address] & 0x0e) >> 1) == 0)
+			state.pit_status[address] &= ~0x80;
+		else
+			state.pit_status[address] |= 0x80;
+		m_pit_epoch[address] = std::chrono::steady_clock::now();
 	}
 }
-
-#define PIT_CLOCK_HZ 1193182
 
 /**
  * Derive a counter's output pin from wall-clock phase since its last load.
@@ -1494,15 +1540,21 @@ void CAliM1543C::pit_write(u32 address, u8 data)
  **/
 bool CAliM1543C::pit_out(int c)
 {
-	if (state.pit_status[c] & 0x40)   // no count loaded: OUT idles high
-		return true;
+	const int mode = (state.pit_status[c] & 0x0e) >> 1;
+	if (state.pit_status[c] & 0x40)
+		return mode != 0;   // after a control word, mode 0 is low; others are high
+	if (c == 2 && (state.reg_61 & 0x01) == 0)
+	{
+		// GATE2 low inhibits counter 2.
+		return mode == 0 ? (state.pit_status[c] & 0x80) != 0 : true;
+	}
 	const u32 n = state.pit_counter[c + PIT_OFFSET_MAX];
 	if (!n)
 		return true;
 	// microsecond granularity: ns * PIT_CLOCK_HZ would overflow u64 after ~4h uptime
 	const u64 clocks = (u64)std::chrono::duration_cast<std::chrono::microseconds>(
 		std::chrono::steady_clock::now() - m_pit_epoch[c]).count() * PIT_CLOCK_HZ / 1000000ull;
-	switch ((state.pit_status[c] & 0x0e) >> 1)
+	switch (mode)
 	{
 	case 0:   // interrupt on terminal count: low while counting, high at terminal
 		return clocks >= n;
@@ -1542,6 +1594,8 @@ void CAliM1543C::pit_clock()
 	for (int i = 0; i < 3; i++)
 	{
 		if (state.pit_status[i] & 0x40)
+			continue;
+		if (i == 2 && (state.reg_61 & 0x01) == 0)
 			continue;
 		switch ((state.pit_status[i] & 0x0e) >> 1)
 		{

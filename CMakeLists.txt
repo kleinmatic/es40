@@ -269,6 +269,7 @@ list(APPEND ES40_SOURCES
     src/SCSIDevice.cpp
     src/Serial.cpp
     src/StdAfx.cpp
+    src/LSI53C1020.cpp
     src/Sym53C810.cpp
     src/Sym53C895.cpp
     src/System.cpp

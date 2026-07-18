@@ -147,6 +147,7 @@
 #include "TraceEngine.h"
 #include "i2c_spd.h"
 #include <atomic>
+#include <chrono>
 #include <mutex>
 
 #if !defined(INCLUDED_SYSTEM_H)
@@ -236,6 +237,7 @@ public:
   u64           PCI_Phys_scatter_gather(u32 address, u64 wsm, u64 tba);
   void          interrupt(int number, bool assert);
   int           LoadROM();
+  void          PrepareX86OptionROMMemory();
   u64           ReadMem(u64 address, int dsize, CSystemComponent* source);
   void          WriteMem(u64 address, int dsize, u64 data,
     CSystemComponent* source);
@@ -288,9 +290,14 @@ public:
 
 private:
   void          ResetChipsetState();
+  void          UpdateX86BIOSClock();
   std::atomic<bool> m_reset_requested{ false };
   std::atomic<bool> m_reset_in_progress{ false };
   std::atomic<bool> m_reported_3c509_probe{ false };
+  std::atomic<bool> m_x86_bios_clock_active{ false };
+  u32           m_x86_bios_clock_initial_ticks{ 0 };
+  u64           m_x86_bios_clock_elapsed_ticks{ 0 };
+  std::chrono::steady_clock::time_point m_x86_bios_clock_epoch;
   u64           cchip_csr_read(u32 address, CSystemComponent* source);
   void          cchip_csr_write(u32 address, u64 data, CSystemComponent* source);
   u64           pchip_csr_read(int num, u32 address);
