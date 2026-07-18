@@ -680,11 +680,9 @@ inline u64 fsqrt64(u64 asig, s32 exp)
   }
 
 #define READ_VIRT_LOCK(va, size, dest)                  \
-  {                                                     \
   pbc = false;                                          \
   DATA_PHYS(va, ACCESS_READ, (size/8)-1);               \
   LLR;                         \
-  CSystem::CLLSCDRAMGuard _llsc_guard(cSystem, !pbc && phys_address < dram_size); \
   if (pbc) {                                            \
     dest = 0;                                           \
     for (int ii=0; ii<(size/8); ii++) {                 \
@@ -694,8 +692,7 @@ inline u64 fsqrt64(u64 asig, s32 exp)
   } else {                                              \
     dest = (phys_address < dram_size ? dram_read(dram_ptr, phys_address, size) : cSystem->ReadMem(phys_address, size, this));  \
   }                                                     \
-  cSystem->cpu_lock(state.iProcNum, phys_address, dest); \
-  }
+  cSystem->cpu_lock(state.iProcNum, phys_address, dest);
 
 #define READ_VIRT_F(va, size, dest, f)                    \
   pbc = false;                                            \
@@ -713,11 +710,9 @@ inline u64 fsqrt64(u64 asig, s32 exp)
   }                                                       \
 
 #define READ_VIRT_LOCK_F(va, size, dest, f)               \
-  {                                                       \
   pbc = false;                                            \
   DATA_PHYS(va, ACCESS_READ, (size/8)-1);                 \
   LLR;                           \
-  CSystem::CLLSCDRAMGuard _llsc_guard(cSystem, !pbc && phys_address < dram_size); \
   if (pbc) {                                              \
     u64 aa = 0;                                           \
     for (int ii=0; ii<(size/8); ii++) {                   \
@@ -728,8 +723,7 @@ inline u64 fsqrt64(u64 asig, s32 exp)
   } else {                                                \
     dest = f((phys_address < dram_size ? dram_read(dram_ptr, phys_address, size) : cSystem->ReadMem(phys_address, size, this))); \
   }                                                       \
-  cSystem->cpu_lock(state.iProcNum, phys_address, dest);   \
-  }
+  cSystem->cpu_lock(state.iProcNum, phys_address, dest);
 
  /**
   * Normal variant of write action
@@ -779,7 +773,6 @@ inline u64 fsqrt64(u64 asig, s32 exp)
     bool _stc_same_address = false;                         \
     pbc = false;                                            \
     DATA_PHYS(_stc_va, ACCESS_WRITE, (size/8)-1);           \
-    CSystem::CLLSCDRAMGuard _llsc_guard(cSystem, !pbc && phys_address < dram_size); \
     if (cSystem->cpu_take_lock(state.iProcNum, phys_address, &_stc_exp, &_stc_same_address) && !pbc) \
     {                                                       \
       LWR;                                                  \

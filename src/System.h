@@ -279,31 +279,6 @@ public:
   u64           get_c_dim(int ProcNum);
   void          set_c_dim(int ProcNum, u64 value);
 
-  class CLLSCDRAMGuard
-  {
-  public:
-    CLLSCDRAMGuard(CSystem* system, bool active);
-    ~CLLSCDRAMGuard();
-    CLLSCDRAMGuard(const CLLSCDRAMGuard&) = delete;
-    CLLSCDRAMGuard& operator=(const CLLSCDRAMGuard&) = delete;
-
-  private:
-    CSystem* system;
-  };
-
-  class CPCIDMAWriteGuard
-  {
-  public:
-    CPCIDMAWriteGuard(CSystem* system, bool active);
-    ~CPCIDMAWriteGuard();
-    CPCIDMAWriteGuard(const CPCIDMAWriteGuard&) = delete;
-    CPCIDMAWriteGuard& operator=(const CPCIDMAWriteGuard&) = delete;
-    void invalidate(u64 address, size_t bytes);
-
-  private:
-    CSystem* system;
-  };
-
   void          cpu_lock(int cpuid, u64 address, u64 value);   // LDx_L: record locked range + loaded value
   bool          cpu_take_lock(int cpuid, u64 address, u64* expected, bool* same_address);
   void          cpu_clear_lock(int cpuid);                     // exception/interrupt: drop the lock
@@ -336,16 +311,6 @@ private:
 
   int           iNumCPUs;
   u64           cpu_lock_value[4]; // per-CPU LDx_L value, for same-address STx_C compare-and-swap
-
-  // Serializes the memory action of LDx_L/STx_C against coherent PCI DMA
-  // writes. It is not held across the full guest reservation interval.
-  std::atomic<u32> cpu_llsc_dma_gate{ 0 }; // writer bit + active LL/SC operation count
-
-  void          cpu_llsc_enter();
-  void          cpu_llsc_leave();
-  void          pci_dma_write_enter();
-  void          pci_dma_write_leave();
-  void          cpu_clear_external_locks(u64 address, size_t bytes);
 
   // Serializes drir RMW + delivery in interrupt() across device threads. On
   // CSystem (not in saved 'state'), so SaveState is unaffected.
