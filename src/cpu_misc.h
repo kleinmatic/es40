@@ -105,6 +105,11 @@
   }                                                                    \
   else                                                                 \
   {                                                                    \
+    /* WTINT (0x3e, kernel-mode by the check above): nap the host      \
+     * thread until an interrupt may be deliverable, then fall         \
+     * through to the PALcode as usual.  Common to VMS/OSF PAL. */     \
+    if(function == 0x3e)                                               \
+      wtint_nap();                                                     \
     if(state.pal_vms)                                                  \
     {                                                                  \
       switch(function)                                                 \

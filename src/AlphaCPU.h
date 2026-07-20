@@ -257,6 +257,7 @@ public:
   virtual int   SaveState(FILE* f);
   virtual int   RestoreState(FILE* f);
   void          irq_h(int number, bool assert, int delay);
+  void          wtint_nap();
   int           get_cpuid();
   void          flush_icache();
 
@@ -449,6 +450,9 @@ private:
   // catch-up so backlog repays at no more than 2x the nominal rate.
   std::chrono::steady_clock::time_point next_timer_fire;
   std::chrono::steady_clock::time_point tick_last_fire;
+
+  // One-shot announcement that the guest's idle loop reached wtint_nap().
+  bool                                  wtint_announced = false;
 
   // Wall-clock RPCC: state.cc advances by real elapsed time * cpu_hz so it tracks the configured
   // CPU frequency regardless of how fast/bursty the JIT runs. This is the last sync timestamp;
