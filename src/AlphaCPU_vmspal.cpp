@@ -693,6 +693,7 @@ void CAlphaCPU::vmspal_call_wtint()
 		fflush(stdout);
 	}
 
+	idle_nap();
 	r0 = 0;
 }
 
