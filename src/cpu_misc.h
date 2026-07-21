@@ -109,7 +109,7 @@
      * thread until an interrupt may be deliverable, then fall         \
      * through to the PALcode as usual.  Common to VMS/OSF PAL. */     \
     if(function == 0x3e)                                               \
-      wtint_nap();                                                     \
+      idle_nap();                                                      \
     if(state.pal_vms)                                                  \
     {                                                                  \
       switch(function)                                                 \

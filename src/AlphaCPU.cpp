@@ -356,7 +356,10 @@
 #if defined(_M_X64) || defined(__x86_64__)
 #include <xmmintrin.h>   // _mm_setcsr: pin host MXCSR for the JIT SSE FP path
 #endif
-#include <thread>        // std::this_thread::sleep_for (wtint_nap)
+#include <thread>        // std::this_thread::sleep_for (idle_nap)
+#include <cstdlib>       // strtoull (idle-PC config)
+#include <cinttypes>     // PRIx64
+#include <string>        // idle_pc_ranges parsing
 
 void CAlphaCPU::release_threads()
 {
@@ -416,6 +419,35 @@ void CAlphaCPU::run()
 				CThread::sleep(1);
 				continue;
 			}
+
+			// Idle-loop PC-window detection.  Some guests' idle loops poll
+			// scheduler state rather than issuing WTINT (e.g. HP OpenVMS
+			// SCH$IDLE_CPU), so they never reach the WTINT hook and would spin
+			// a host core at 100%.  When the guest PC lands inside a configured
+			// idle range for idle_pc_count consecutive dispatch batches, nap
+			// the host thread.  A false positive costs at most one nap (<=1ms,
+			// broken early by any interrupt), so a short streak is safe.
+			if (idle_detect)
+			{
+				bool in_idle = false;
+				for (size_t r = 0; r < idle_ranges.size(); r++)
+					if (state.pc >= idle_ranges[r].first
+						&& state.pc <= idle_ranges[r].second)
+					{
+						in_idle = true;
+						break;
+					}
+				if (in_idle)
+				{
+					if (++idle_hits >= idle_pc_count)
+					{
+						idle_hits = idle_pc_count;   // saturate; avoid overflow
+						idle_nap();
+					}
+				}
+				else
+					idle_hits = 0;
+			}
 		}
 	}
 	catch (CException& e)
@@ -427,38 +459,45 @@ void CAlphaCPU::run()
 }
 
 /**
- * WTINT (CALL_PAL 0x3E) host-side nap.
+ * Host-side idle nap: sleep this CPU's host thread until an interrupt may be
+ * deliverable, instead of spinning while the guest is idle.
  *
- * The guest's idle loop (OpenVMS SCH$IDLE, Tru64's idle thread) calls WTINT --
- * "wait for interrupt" -- in a tight loop.  On real hardware the CPU stalls in
- * PALcode until an interrupt arrives; under emulation the PALcode WTINT
- * returns immediately, so an idle guest spins a host core at 100%.
+ * Two callers drive it:
+ *  - CALL_PAL WTINT (0x3E): the guest's idle loop (Tru64's idle thread, or
+ *    OpenVMS with the SRI idle driver) issues WTINT -- "wait for interrupt".
+ *    On real hardware the CPU stalls in PALcode until an interrupt arrives;
+ *    under emulation the PALcode returns immediately, so an idle guest spins
+ *    a host core at 100%.  The WTINT hook naps here, then vectors into the ROM
+ *    PALcode WTINT unchanged.
+ *  - The idle-PC-window detector (see run()): guests whose idle loop polls
+ *    rather than issuing WTINT (e.g. HP OpenVMS SCH$IDLE_CPU) never reach the
+ *    WTINT hook, so run() naps here when the guest PC dwells in a configured
+ *    idle range.
  *
- * Sleep the host thread here, at the CALL_PAL dispatch boundary, then let the
- * caller vector into the ROM PALcode WTINT unchanged.  Nothing guest-visible
- * is altered: wall-clock time passes during WTINT exactly as on real silicon
- * (RPCC and the interval timer are both wall-clock-paced).
+ * Nothing guest-visible is altered: wall-clock time passes during the nap
+ * exactly as on real silicon (RPCC and the interval timer are both
+ * wall-clock-paced, and jit_run() fires any due tick as soon as the nap ends).
  *
  * Wake conditions:
  *  - state.check_int / state.check_timers -- raised cross-thread by irq_h()
  *    for immediate and delayed interrupt assertion respectively.  Polled at
  *    100us granularity, which bounds added interrupt latency at ~one poll
  *    step (vs. the guest's own multi-ms interval-timer period).
- *  - CPU0 only: next_timer_fire.  CPU0's own execute loop drives the
+ *  - CPU0 only: next_timer_fire.  CPU0's own dispatch loop drives the
  *    wall-clock Cchip interval timer, so it must never sleep past the next
  *    scheduled fire -- no other thread would fire the tick.
  *  - StopThread / system reset, so shutdown never blocks on an idle guest.
- *  - Secondaries cap the nap at 1ms so they stay responsive to state they
- *    do not poll here (e.g. wait_for_start reset interactions).
+ *  - The nap is capped at 1ms so the CPU stays responsive to state it does
+ *    not poll here (e.g. wait_for_start reset interactions).
  **/
-void CAlphaCPU::wtint_nap()
+void CAlphaCPU::idle_nap()
 {
 	using namespace std::chrono;
 
-	if (!wtint_announced)
+	if (!idle_announced)
 	{
-		wtint_announced = true;
-		printf("*** CPU%d *** WTINT idle nap active ***\n", get_cpuid());
+		idle_announced = true;
+		printf("*** CPU%d *** idle nap engaged ***\n", get_cpuid());
 		fflush(stdout);   // stdout is block-buffered when captured by a service manager
 	}
 
@@ -503,6 +542,44 @@ void CAlphaCPU::init()
 #endif
 
 	state.iProcNum = cSystem->RegisterCPU(this);
+
+	// Idle-loop PC-window detection (optional).  idle_pc_ranges is a comma-
+	// separated list of hex "lo-hi" guest-PC windows (e.g.
+	// "80148A00-80148D00,80190000-80192000"); empty disables it.  See
+	// idle_nap() / run().
+	{
+		std::string spec = myCfg->get_text_value("idle_pc_ranges", "");
+		size_t pos = 0;
+		while (pos < spec.size())
+		{
+			size_t comma = spec.find(',', pos);
+			std::string tok = spec.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+			size_t dash = tok.find('-');
+			if (dash != std::string::npos)
+			{
+				u64 lo = strtoull(tok.substr(0, dash).c_str(), 0, 16);
+				u64 hi = strtoull(tok.substr(dash + 1).c_str(), 0, 16);
+				if (hi != 0 && hi >= lo)
+					idle_ranges.push_back(std::make_pair(lo, hi));
+			}
+			if (comma == std::string::npos)
+				break;
+			pos = comma + 1;
+		}
+		idle_pc_count = (int)myCfg->get_num_value("idle_pc_count", true, 3);
+		if (idle_pc_count < 1)
+			idle_pc_count = 1;
+		idle_detect = !idle_ranges.empty();
+		if (idle_detect)
+		{
+			printf("CPU%d: idle-PC detect, %d range(s):",
+				(int)state.iProcNum, (int)idle_ranges.size());
+			for (size_t r = 0; r < idle_ranges.size(); r++)
+				printf(" [%016" PRIx64 "..%016" PRIx64 "]",
+					idle_ranges[r].first, idle_ranges[r].second);
+			printf(" count=%d\n", idle_pc_count);
+		}
+	}
 
 #ifdef ES40_JIT
 	if (!m_jit) m_jit = new CJitEngine((int)state.iProcNum);

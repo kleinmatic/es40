@@ -219,6 +219,8 @@
 #define INCLUDED_ALPHACPU_H
 
 #include <atomic>
+#include <vector>
+#include <utility>
 
 #include "SystemComponent.h"
 #include "System.h"
@@ -257,7 +259,7 @@ public:
   virtual int   SaveState(FILE* f);
   virtual int   RestoreState(FILE* f);
   void          irq_h(int number, bool assert, int delay);
-  void          wtint_nap();
+  void          idle_nap();
   int           get_cpuid();
   void          flush_icache();
 
@@ -451,8 +453,19 @@ private:
   std::chrono::steady_clock::time_point next_timer_fire;
   std::chrono::steady_clock::time_point tick_last_fire;
 
-  // One-shot announcement that the guest's idle loop reached wtint_nap().
-  bool                                  wtint_announced = false;
+  // One-shot announcement that this CPU's idle loop reached idle_nap().
+  bool                                  idle_announced = false;
+
+  // Idle-loop PC-window detection (optional; off unless idle_pc_ranges set).
+  // When the guest PC stays inside any configured idle range for idle_pc_count
+  // consecutive dispatch batches, nap the host thread. Covers guests whose
+  // idle path polls / does idle-time work rather than issuing WTINT -- e.g. the
+  // OpenVMS null process (SCH$IDLE_CPU poll + PAGE_ZEROING). Multiple ranges
+  // because that idle path spans several routines.
+  bool                                  idle_detect = false;
+  std::vector<std::pair<u64, u64>>      idle_ranges;
+  int                                   idle_pc_count = 3;
+  int                                   idle_hits = 0;
 
   // Wall-clock RPCC: state.cc advances by real elapsed time * cpu_hz so it tracks the configured
   // CPU frequency regardless of how fast/bursty the JIT runs. This is the last sync timestamp;
