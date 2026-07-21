@@ -902,6 +902,8 @@ int main(int argc, char* argv[])
 	card_q.addAnswer("nic", "dec21143", "DEC 21143 Network Interface (1 max)");
 #endif
 	card_q.addAnswer("scsi", "sym53c810", "Symbios 53C810 narrow SCSI controller");
+	card_q.addAnswer("lsi scsi", "lsi53c1020",
+		"LSI 53C1020 Fusion-MPT Ultra320 SCSI controller NOT SRM BOOT CAPABLE");
 	card_q.addAnswer("es1370 audio", "es1370", "ES1370 Audio card (works only with Windows NT 4.0)");
 
 	/* Loop until there are no more PCI
@@ -996,6 +998,92 @@ int main(int argc, char* argv[])
 			 */
 			for (int i = 0; i < 7; i++)
 			{
+				disk_q.addAnswer(i2s(i), "disk0." + i2s(i), "Target " + i2s(i));
+			}
+			/* Ask what disks to add.
+			 */
+			add_disks(&disk_q, &os);
+		}
+		else if (card_q.getAnswer() == "lsi53c1020")
+		{
+			MultipleChoiceQuestion flash_q;
+			flash_q.setQuestion("Do you want the LSI card flash to persist between emulator runs?");
+			flash_q.setExplanation("The optional backing file is a raw 512 KiB image of the card's "
+				"flash. If it does not exist, ES40 creates it when possible. Without a flash backing "
+				"file, BIOS and IOC firmware changes remain volatile.");
+			flash_q.addAnswer("no", "", "Use volatile card flash");
+			flash_q.addAnswer("yes", "yes", "Configure a persistent raw flash image");
+			flash_q.setDefault("no");
+			if (flash_q.ask() != "")
+			{
+				FreeTextQuestion lsi_flash_q;
+				lsi_flash_q.setQuestion("Where should the LSI card flash image be stored?");
+				lsi_flash_q.setExplanation("Use a different 512 KiB backing file for each emulated "
+					"controller. An existing image always takes precedence over seed files.");
+#if defined(_WIN32)
+				lsi_flash_q.setDefault("rom\\lsi53c1020.flash");
+#elif defined(__VMS)
+				lsi_flash_q.setDefault("[.ROM]LSI53C1020.FLASH");
+#else
+				lsi_flash_q.setDefault("rom/lsi53c1020.flash");
+#endif
+				os << "    flash = \"" << lsi_flash_q.ask() << "\";\n";
+			}
+
+			MultipleChoiceQuestion firmware_q;
+			firmware_q.setQuestion("Do you want to configure initial LSI BIOS and IOC firmware images?");
+			firmware_q.setExplanation("These files seed the card only when no persistent flash image "
+				"has been loaded. They are not reapplied on later starts, so changes made by firmware or "
+				"an operating system remain intact. The behavioral controller starts without either seed.");
+			firmware_q.addAnswer("no", "", "Use the built-in behavioral controller without external images");
+			firmware_q.addAnswer("yes", "yes", "Configure first-use LSI flash seed files");
+			firmware_q.setDefault("no");
+			if (firmware_q.ask() != "")
+			{
+				FreeTextQuestion lsi_rom_q;
+				FreeTextQuestion lsi_firmware_q;
+				lsi_rom_q.setQuestion("Where can the LSI PCI BIOS image be found?");
+				lsi_rom_q.setExplanation("Use the unmodified mptps.rom file from a compatible LSI firmware "
+					"package. It is used only when initializing card flash. AlphaBIOS can execute this "
+					"x86 ROM and expose attached disks through SCSIBIOS; SRM does not use it.");
+				lsi_firmware_q.setQuestion("Where can the LSI IOC firmware image be found?");
+				lsi_firmware_q.setExplanation("Use the supplied it_1030.fw compatibility image for the "
+					"plain 53C1020; the T image is for 53C1020A/1030T controllers. The image is used only "
+					"when initializing flash, and does not change the emulated card's 53C1020 identity.");
+#if defined(_WIN32)
+				lsi_rom_q.setDefault("rom\\mptps.rom");
+				lsi_firmware_q.setDefault("rom\\it_1030.fw");
+#elif defined(__VMS)
+				lsi_rom_q.setDefault("[.ROM]MPTPS.ROM");
+				lsi_firmware_q.setDefault("[.ROM]IT_1030.FW");
+#else
+				lsi_rom_q.setDefault("rom/mptps.rom");
+				lsi_firmware_q.setDefault("rom/it_1030.fw");
+#endif
+				os << "    rom = \"" << lsi_rom_q.ask() << "\";\n";
+				os << "    firmware = \"" << lsi_firmware_q.ask() << "\";\n";
+			}
+
+			/* Use a ShrinkingChoiceQuestion; once
+			 * a disk position has been used, it
+			 * can't be used again.
+			 */
+			ShrinkingChoiceQuestion disk_q;
+			disk_q.setQuestion("Do you want to add any disks to the LSI53C1020 controller?");
+			disk_q.setDefault("none");
+			disk_q.setExplanation("Alpha SRM can identify the PCI card as a pka device, but has no "
+				"boot-capable 53C1020 Fusion-MPT driver. With the optional x86 LSI BIOS, AlphaBIOS "
+				"can expose attached disks through SCSIBIOS managed devices, although OS function  "
+				"has not yet been validated. Otherwise disks require guest OS Fusion-MPT support.  "
+				"Select 'none' if you have no more disks to add.");
+			disk_q.addAnswer("none", "", "stop adding disks");
+			/* The wide SCSI controller supports targets
+			 * 0..6 and 8..15; target 7 is the initiator.
+			 */
+			for (int i = 0; i < 16; i++)
+			{
+				if (i == 7)
+					continue;
 				disk_q.addAnswer(i2s(i), "disk0." + i2s(i), "Target " + i2s(i));
 			}
 			/* Ask what disks to add.
