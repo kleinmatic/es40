@@ -460,13 +460,13 @@ void CAlphaCPU::run()
  * Host-side idle nap: sleep this CPU's host thread until an interrupt may be
  * deliverable, instead of spinning while the guest is idle.
  *
- * Two callers drive it:
+ * Callers:
  *  - CALL_PAL WTINT (0x3E): the guest's idle loop (Tru64's idle thread, or
  *    OpenVMS with the SRI idle driver) issues WTINT -- "wait for interrupt".
- *    On real hardware the CPU stalls in PALcode until an interrupt arrives;
- *    under emulation the PALcode returns immediately, so an idle guest spins
- *    a host core at 100%.  The WTINT hook naps here, then vectors into the ROM
- *    PALcode WTINT unchanged.
+ *    Under VMS PALcode this is completed natively (vmspal_call_wtint(): nap
+ *    here, R0=0, no ROM vector -- the ROM has no 0x3e handler and would
+ *    OPCDEC).  Under OSF PALcode the ROM implements WTINT, so DO_CALL_PAL
+ *    naps here first and then vectors to the ROM unchanged.
  *  - The idle-PC-window detector (see run()): guests whose idle loop polls
  *    rather than issuing WTINT (e.g. HP OpenVMS SCH$IDLE_CPU) never reach the
  *    WTINT hook, so run() naps here when the guest PC dwells in a configured

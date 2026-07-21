@@ -401,6 +401,7 @@ private:
   void            vmspal_call_mfpr_astsr();
   void            vmspal_call_mfpr_vptb();
   void            vmspal_call_mtpr_datfx();
+  void            vmspal_call_wtint();
   void            vmspal_call_mfpr_whami();
   void            vmspal_call_imb();
   void            vmspal_call_prober();
@@ -455,6 +456,13 @@ private:
 
   // One-shot announcement that this CPU's idle loop reached idle_nap().
   bool                                  idle_announced = false;
+
+  // WTINT instrumentation. wtint_count totals every natively-completed
+  // CALL_PAL WTINT; the first few are logged with their PC so a load-time
+  // probe (one-shot, image-space PC) is distinguishable from the runtime
+  // idle callout (repeating, S0-space PC).
+  u64                                   wtint_count = 0;
+  int                                   wtint_logged = 0;
 
   // Idle-loop PC-window detection (optional; off unless idle_pc_ranges set).
   // When the guest PC stays inside any configured idle range for idle_pc_count

@@ -649,6 +649,54 @@ void CAlphaCPU::vmspal_call_mtpr_datfx()
 }
 
 /**
+ * Implementation of CALL_PAL WTINT opcode (function 0x3E, "wait for interrupt").
+ *
+ * The ES40 SRM ROM's VMS PALcode has no handler for 0x3E: vectoring there
+ * raises OPCDEC in the guest -- which is exactly what the SRI/CHARON SYS$IDLE
+ * driver's load-time probe tests for (it executes WTINT under a condition
+ * handler and returns SS$_UNSUPPORTED on the fault).  So WTINT must be
+ * completed natively like the other vmspal_call_* functions, never delegated
+ * to the ROM.
+ *
+ * Semantics (Alpha ARM, VMS/OSF common PAL): stall the CPU until an interrupt
+ * may be deliverable, then return in R0 the number of interval-clock ticks
+ * skipped while stalled.  idle_nap() sleeps the host thread but -- on CPU 0,
+ * which drives the wall-clock Cchip interval tick -- never past
+ * next_timer_fire, and the tick schedule is count-preserving with catch-up.
+ * No tick is ever skipped, so R0 = 0 is the true answer, not just the
+ * architecturally-permitted minimum.
+ *
+ * Privilege: the caller-mode check lives in DO_CALL_PAL (function < 0x40 with
+ * state.cm != 0 traps OPCDEC before dispatch reaches this helper), same as
+ * every other privileged PAL function.  PC: the interpreter advanced state.pc
+ * past the CALL_PAL before decode, so like the other direct completions this
+ * helper must not touch it.  Interrupt dispatch: the interpreter's step top
+ * and jit_run's dispatch gates both refuse compiled code while
+ * check_int/check_timers is pending, so an interrupt arriving during the nap
+ * is serviced before any further guest code runs.
+ **/
+void CAlphaCPU::vmspal_call_wtint()
+{
+	wtint_count++;
+	if (wtint_logged < 8)
+	{
+		wtint_logged++;
+		printf("*** CPU%d *** WTINT #%llu at pc=%016llx (native completion) ***\n",
+			   get_cpuid(), (unsigned long long) wtint_count,
+			   (unsigned long long) state.current_pc);
+		fflush(stdout);   // stdout is block-buffered under a service manager
+	}
+	else if ((wtint_count & 0xfffff) == 0)   // liveness marker every 2^20 calls
+	{
+		printf("*** CPU%d *** WTINT count %llu ***\n", get_cpuid(),
+			   (unsigned long long) wtint_count);
+		fflush(stdout);
+	}
+
+	r0 = 0;
+}
+
+/**
  * Implementation of CALL_PAL MFPR_WHAMI opcode.
  **/
 void CAlphaCPU::vmspal_call_mfpr_whami()
