@@ -80,6 +80,8 @@
   // (between semaphore wakes). Real drivers never approach this.
 #define SYM_MAX_INSN_PER_BURST 100000
 
+#define SYM_INLINE_INSN_BUDGET 500 // inline burst budget to avoid reg write overtaking scripts processor
+
   /// Register 00: SCNTL0: SCSI Control 0
 #define R_SCNTL0        0x00
 #define R_SCNTL0_ARB1   0x80
@@ -533,7 +535,17 @@ void CSym53C810::run()
 				}
 				if (!state.executing)
 					break;
-				execute();
+				scripts_running = true;
+				try
+				{
+					execute();
+				}
+				catch (...)
+				{
+					scripts_running = false;
+					throw;
+				}
+				scripts_running = false;
 			}
 		}
 	}
@@ -555,7 +567,8 @@ void CSym53C810::run()
 CSym53C810::CSym53C810(CConfigurator* cfg, CSystem* c, int pcibus, int pcidev)
 	: CPCIDevice(cfg, c, pcibus, pcidev),
 	CDiskController(1, 7),
-	mySemaphore(0, 1)
+	mySemaphore(0, 1),
+	scripts_running(false)
 {
 
 	// create scsi bus
@@ -783,14 +796,14 @@ void CSym53C810::WriteMem_Bar(int func, int bar, u32 address, int dsize, u32 dat
 		switch (dsize)
 		{
 		case 8:
-			MUTEX_LOCK(myRegLock);
+		{
+			CScopedLock<CMutex> regLock(myRegLock);
 #if defined(DEBUG_SYM_REGS)
 			printf("SYM: Write to register %02x: %02x.   \n", address, data);
 #endif
 			if (address >= R_SCRATCHB)
 			{
 				state.regs.reg8[address] = (u8)data;
-				MUTEX_UNLOCK(myRegLock);
 				break;
 			}
 
@@ -942,8 +955,8 @@ void CSym53C810::WriteMem_Bar(int func, int bar, u32 address, int dsize, u32 dat
 				printf("SYM: Write to unknown register at %02x with %08x.\n", address, data);
 			}
 
-			MUTEX_UNLOCK(myRegLock);
 			break;
+		}
 
 		case 16:
 		{
@@ -997,11 +1010,11 @@ u32 CSym53C810::ReadMem_Bar(int func, int bar, u32 address, int dsize)
 		switch (dsize)
 		{
 		case 8:
-			MUTEX_LOCK(myRegLock);
+		{
+			CScopedLock<CMutex> regLock(myRegLock);
 			if (address >= R_SCRATCHB)
 			{
 				data = state.regs.reg8[address];
-				MUTEX_UNLOCK(myRegLock);
 				break;
 			}
 
@@ -1148,11 +1161,11 @@ u32 CSym53C810::ReadMem_Bar(int func, int bar, u32 address, int dsize)
 					address);
 			}
 
-			MUTEX_UNLOCK(myRegLock);
 #if defined(DEBUG_SYM_REGS)
 			printf("SYM: Read from register %02x: %02x.   \n", address, data);
 #endif
 			break;
+		}
 
 		case 16:
 		{
@@ -1339,7 +1352,7 @@ void CSym53C810::write_b_istat(u8 value)
 			R32(DSP) = state.wait_jump;
 			state.wait_reselect = false;
 			state.executing = true;
-			mySemaphore.set();
+			execute_scripts_inline();
 		}
 	}
 
@@ -1486,8 +1499,7 @@ u8 CSym53C810::read_b_sist(int id)
  * This is implemented as a separate function, because there are
  * some side-effects.
  *
- * STD (Start DMA Operation): Start executing SCSI SCRIPT. Needs to
- * wake the thread.
+ * STD (Start DMA Operation): Start executing SCSI SCRIPT immediately.
  *
  * IRQD (IRQ Disable): disables the IRQ pin. Requires interrupt
  * re-evaluation.
@@ -1500,7 +1512,7 @@ void CSym53C810::write_b_dcntl(u8 value)
 	if (value & R_DCNTL_STD)
 	{
 		state.executing = true;
-		mySemaphore.set();
+		execute_scripts_inline();
 	}
 
 	//IRQD bit...
@@ -1546,17 +1558,49 @@ void CSym53C810::write_b_stest3(u8 value)
 /**
  * Called after the DMA Scripts Pointer register has been written.
  *
- * Start executing SCSI SCRIPT. Needs to wake the thread.
+ * Start executing SCSI SCRIPT immediately.
  **/
 void CSym53C810::post_dsp_write()
 {
 	if (!TB_R8(DMODE, MAN))
 	{
 		state.executing = true;
-		mySemaphore.set();
+		execute_scripts_inline();
 		
 		//printf("SYM: Execution started @ %08x.\n",R32(DSP));
 	}
+}
+
+/**
+ * Execute a bounded SCRIPTS burst in the register-writing thread.
+ *
+ * The physical controller begins fetching immediately after DSP or STD is
+ * written. Deferring every fetch to a host worker thread leaves an artificial
+ * window in which a later SIGP write can overtake the start and be consumed by
+ * cleanup code before the controller reaches WAIT RESELECT.
+ **/
+void CSym53C810::execute_scripts_inline()
+{
+	if (scripts_running || !state.executing)
+		return;
+
+	scripts_running = true;
+	state.insn_processed = 0;
+	try
+	{
+		while (state.executing &&
+			state.insn_processed < SYM_INLINE_INSN_BUDGET)
+			execute();
+	}
+	catch (...)
+	{
+		scripts_running = false;
+		throw;
+	}
+	scripts_running = false;
+
+	if (state.executing)
+		mySemaphore.set();
 }
 
 /**

@@ -128,6 +128,7 @@ private:
   void execute_tc_op();
   void execute_bm_op();
   void  execute();
+  void  execute_scripts_inline();
 
   void  eval_interrupts();
   void  set_interrupt(int reg, u8 interrupt);
@@ -137,6 +138,7 @@ private:
   CSemaphore mySemaphore;
   CMutex* myRegLock;
   bool            StopThread;
+  bool            scripts_running;
 
   /// The state structure contains all elements that need to be saved to the statefile.
   struct SSym_state
