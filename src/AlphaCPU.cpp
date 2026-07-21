@@ -420,13 +420,10 @@ void CAlphaCPU::run()
 				continue;
 			}
 
-			// Idle-loop PC-window detection.  Some guests' idle loops poll
-			// scheduler state rather than issuing WTINT (e.g. HP OpenVMS
-			// SCH$IDLE_CPU), so they never reach the WTINT hook and would spin
-			// a host core at 100%.  When the guest PC lands inside a configured
-			// idle range for idle_pc_count consecutive dispatch batches, nap
-			// the host thread.  A false positive costs at most one nap (<=1ms,
-			// broken early by any interrupt), so a short streak is safe.
+#ifndef ES40_JIT
+			// Idle-loop PC-window detection (interpreter build).  For the JIT
+			// build the equivalent check lives at jit_run()'s dispatch top so it
+			// naps before entering a self-looping idle trace.  See idle_nap().
 			if (idle_detect)
 			{
 				bool in_idle = false;
@@ -441,13 +438,14 @@ void CAlphaCPU::run()
 				{
 					if (++idle_hits >= idle_pc_count)
 					{
-						idle_hits = idle_pc_count;   // saturate; avoid overflow
+						idle_hits = idle_pc_count;
 						idle_nap();
 					}
 				}
 				else
 					idle_hits = 0;
 			}
+#endif
 		}
 	}
 	catch (CException& e)
@@ -942,6 +940,37 @@ void CAlphaCPU::jit_run(int budget)
 	{
 		const u64 start_virt = state.pc;
 		const u32 start_asn = (u32)state.asn;
+
+		// Idle-loop PC-window detection.  A guest whose idle loop polls rather
+		// than issuing WTINT (e.g. the HP OpenVMS null process) gets compiled
+		// into a self-looping trace that spins natively here until the interval
+		// tick forces a side-exit -- so napping at that exit is too late (the
+		// tick is already due).  Instead nap HERE, at the dispatch top, before
+		// entering the idle block/trace: the nap lands mid tick-period and is a
+		// real sleep.  Then break out of jit_run so the caller re-enters and
+		// its dispatch-top poll fires the now-due tick before we re-evaluate.
+		if (idle_detect)
+		{
+			bool in_idle = false;
+			for (size_t r = 0; r < idle_ranges.size(); r++)
+				if (start_virt >= idle_ranges[r].first
+					&& start_virt <= idle_ranges[r].second)
+				{
+					in_idle = true;
+					break;
+				}
+			if (in_idle)
+			{
+				if (++idle_hits >= idle_pc_count)
+				{
+					idle_hits = idle_pc_count;
+					idle_nap();
+					break;
+				}
+			}
+			else
+				idle_hits = 0;
+		}
 
 		// Resolve the block's physical start side-effect-free (FAKE = no fault, no TB fill) so
 		// execute() stays the sole I-stream fetcher; covers superpage/KSEG (no TB entry). phys
