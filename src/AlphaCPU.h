@@ -452,15 +452,10 @@ private:
   std::chrono::steady_clock::time_point next_timer_fire;
   std::chrono::steady_clock::time_point tick_last_fire;
 
-  // One-shot announcement that this CPU's idle loop reached idle_nap().
+  // CALL_PAL WTINT idle handling: off unless the cpu config sets
+  // idle_nap = true.  idle_announced makes the first nap log once.
+  bool                                  idle_nap_enabled = false;
   bool                                  idle_announced = false;
-
-  // WTINT instrumentation. wtint_count totals every natively-completed
-  // CALL_PAL WTINT; the first few are logged with their PC so a load-time
-  // probe (one-shot, image-space PC) is distinguishable from the runtime
-  // idle callout (repeating, S0-space PC).
-  u64                                   wtint_count = 0;
-  int                                   wtint_logged = 0;
 
   // Wall-clock RPCC: state.cc advances by real elapsed time * cpu_hz so it tracks the configured
   // CPU frequency regardless of how fast/bursty the JIT runs. This is the last sync timestamp;

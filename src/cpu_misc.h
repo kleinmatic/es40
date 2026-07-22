@@ -105,7 +105,16 @@
   }                                                                    \
   else                                                                 \
   {                                                                    \
-    if(state.pal_vms)                                                  \
+    if((function == 0x3e) && idle_nap_enabled                          \
+       && (state.pal_base == U64(0x8000)))                             \
+    {                                                                  \
+      /* WTINT under VMS PALcode: complete natively -- the ROM has no  \
+       * 0x3e handler and would OPCDEC.  Keyed on PAL_BASE rather than \
+       * pal_vms because the JIT forces pal_vms false.  Off unless the \
+       * cpu config sets idle_nap = true. */                           \
+      vmspal_call_wtint();                                             \
+    }                                                                  \
+    else if(state.pal_vms)                                             \
     {                                                                  \
       switch(function)                                                 \
       {                                                                \
@@ -265,13 +274,6 @@
         vmspal_call_mtpr_datfx();                                      \
         break;                                                         \
                                                                 \
-      case 0x3e:  /* WTINT: complete natively -- the ROM PALcode has   \
-                   * no 0x3e handler and would OPCDEC (see             \
-                   * vmspal_call_wtint). Kernel-mode by the check      \
-                   * above. */                                         \
-        vmspal_call_wtint();                                           \
-        break;                                                         \
-                                                                \
       case 0x3f:  /* MFPR_WHAMI */                                     \
         vmspal_call_mfpr_whami();                                      \
         break;                                                         \
@@ -322,8 +324,8 @@
     }                                                                  \
     else                                                               \
     {                                                                  \
-      /* Non-VMS (OSF) PALcode implements WTINT itself: nap the host   \
-       * thread first, then vector to the ROM unchanged. */            \
+      /* Non-VMS PALcode implements WTINT itself: nap first (no-op     \
+       * unless enabled), then vector to the ROM unchanged. */         \
       if(function == 0x3e)                                             \
         idle_nap();                                                    \
       ENTER_NATIVE_CALL_PAL();                                         \

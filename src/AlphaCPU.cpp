@@ -427,35 +427,22 @@ void CAlphaCPU::run()
 }
 
 /**
- * Host-side idle nap: sleep this CPU's host thread until an interrupt may be
- * deliverable, instead of spinning while the guest is idle.
- *
- * Caller: CALL_PAL WTINT (0x3E).  The guest's idle loop (Tru64's idle thread,
- * or OpenVMS with the SRI idle driver) issues WTINT -- "wait for interrupt".
- * Under VMS PALcode this is completed natively (vmspal_call_wtint(): nap
- * here, R0=0, no ROM vector -- the ROM has no 0x3e handler and would
- * OPCDEC).  Under OSF PALcode the ROM implements WTINT, so DO_CALL_PAL
- * naps here first and then vectors to the ROM unchanged.
- *
- * Nothing guest-visible is altered: wall-clock time passes during the nap
- * exactly as on real silicon (RPCC and the interval timer are both
- * wall-clock-paced, and jit_run() fires any due tick as soon as the nap ends).
- *
- * Wake conditions:
- *  - state.check_int / state.check_timers -- raised cross-thread by irq_h()
- *    for immediate and delayed interrupt assertion respectively.  Polled at
- *    100us granularity, which bounds added interrupt latency at ~one poll
- *    step (vs. the guest's own multi-ms interval-timer period).
- *  - CPU0 only: next_timer_fire.  CPU0's own dispatch loop drives the
- *    wall-clock Cchip interval timer, so it must never sleep past the next
- *    scheduled fire -- no other thread would fire the tick.
- *  - StopThread / system reset, so shutdown never blocks on an idle guest.
- *  - The nap is capped at 1ms so the CPU stays responsive to state it does
- *    not poll here (e.g. wait_for_start reset interactions).
+ * CALL_PAL WTINT: sleep the host thread while the guest idles, instead of
+ * spinning.  Guest-visible time is unaffected -- RPCC and the interval timer
+ * are wall-clock-paced.  Wakes when an interrupt/timer is pending (polled at
+ * 100us) or on StopThread/reset, and is capped at 1ms; CPU0 additionally
+ * never sleeps past next_timer_fire, because its own dispatch loop is what
+ * fires the interval tick.  No-op unless the cpu config sets idle_nap = true,
+ * and on multiprocessor configs regardless (waking a napping sibling CPU
+ * needs cross-thread IPI wakeup this change does not attempt; WTINT still
+ * completes correctly, it just returns immediately).
  **/
 void CAlphaCPU::idle_nap()
 {
 	using namespace std::chrono;
+
+	if (!idle_nap_enabled || (cSystem && cSystem->get_cpu_num() > 1))
+		return;
 
 	if (!idle_announced)
 	{
@@ -496,6 +483,7 @@ void CAlphaCPU::init()
 	last_dtb_virt[0] = last_dtb_virt[1] = 0;
 
 	cpu_hz = myCfg->get_num_value("speed", true, 500000000);
+	idle_nap_enabled = myCfg->get_bool_value("idle_nap", false);
 #ifdef ES40_JIT
 	// With the JIT, PALcode runs natively (compiled like any other guest code) rather than being
 	// shortcut by the high-level vmspal routines, so the replacement is force-disabled
@@ -604,6 +592,7 @@ void CAlphaCPU::ResetForSystemReset()
 	state.iProcNum = savedProcNum;
 
 	cpu_hz = myCfg->get_num_value("speed", true, 500000000);
+	idle_nap_enabled = myCfg->get_bool_value("idle_nap", false);
 
 	state.wait_for_start = (state.iProcNum == 0) ? false : true;
 	icache_enabled = true;
