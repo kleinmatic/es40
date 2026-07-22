@@ -219,6 +219,7 @@
 #define INCLUDED_ALPHACPU_H
 
 #include <atomic>
+#include <chrono>
 
 #include "SystemComponent.h"
 #include "System.h"
@@ -452,8 +453,24 @@ private:
 
   // Wall-clock RPCC: state.cc advances by real elapsed time * cpu_hz so it tracks the configured
   // CPU frequency regardless of how fast/bursty the JIT runs. This is the last sync timestamp;
-  // the delta since it (when cc_ena) is added to state.cc each jit_run, then it's reset to now.
+  // the delta since it (when cc_ena) is added to state.cc at each sync point, then it's reset to now.
   std::chrono::steady_clock::time_point cc_last_sync;
+
+  // Advance the wall-clock cc to now. Called at batch boundaries AND on every guest RPCC read.
+  void sync_cc_wallclock()
+  {
+    const auto now = std::chrono::steady_clock::now();
+    if (cc_last_sync > now)
+      cc_last_sync = now;
+    auto cc_delta = now - cc_last_sync;
+    cc_last_sync = now;
+    if (state.cc_ena)
+    {
+      if (cc_delta > std::chrono::seconds(1))   // cap (not drop) odd deltas, as at batch top
+        cc_delta = std::chrono::seconds(1);
+      state.cc += (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(cc_delta).count() * cpu_hz / 1000000000ULL;
+    }
+  }
 
   // DRAM fast-path cache
   char* dram_ptr;    // cSystem->PtrToMem(0) - host pointer to base es40 ram array thingy

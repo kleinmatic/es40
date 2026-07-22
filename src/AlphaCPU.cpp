@@ -759,20 +759,12 @@ void CAlphaCPU::jit_run(int budget)
 	const auto now = std::chrono::steady_clock::now();
 	cc_last_sync += std::chrono::nanoseconds(g_diag_excluded_ns);   // keep device-diagnostic print stalls out of the RPCC (diag_rpcc.h)
 	g_diag_excluded_ns = 0;
-	if (cc_last_sync > now) cc_last_sync = now;   // a stall can't exceed the batch's real elapsed; never bill negative
-	auto cc_delta = now - cc_last_sync;
-	cc_last_sync = now;
 	// Wall-clock RPCC: advance the cycle counter by real elapsed time * cpu_hz (when enabled) so
-	// it tracks the configured CPU frequency no matter how fast/bursty the JIT runs.
-	// Cap (not drop) odd deltas at 1s: dropping made the cc run slow through early-boot
+	// it tracks the configured CPU frequency no matter how fast/bursty the JIT runs. The helper
+	// caps (not drops) odd deltas at 1s: dropping made the cc run slow through early-boot
 	// device-init stalls, and SRM's cycles-per-tick calibration locked that in as a
 	// too-low CPU speed (the 357MHz bug).
-	if (state.cc_ena)
-	{
-		if (cc_delta > std::chrono::seconds(1))
-			cc_delta = std::chrono::seconds(1);
-		state.cc += (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(cc_delta).count() * cpu_hz / 1000000000ULL;
-	}
+	sync_cc_wallclock();
 
 	// Drive the Cchip interval timer once per dispatch batch (CPU0 only), not
 	// once per instruction the way the in-execute() poll did.
@@ -1430,8 +1422,8 @@ int CAlphaCPU::jit_fp_write(CAlphaCPU* cpu, u64 va, u32 fa, u32 descr)
 }
 
 // JIT MISC read helper (static). RPCC (sel 0): the wall-clock-pinned cycle counter (DO_RPCC, JIT
-// lane). RC (sel 1) / RS (sel 2): read the interrupt flag, then clear / set it. All three read
-// state the differential verify can't re-derive (cc advances only at the jit_run boundary; the
+// lane), synced to now at each read. RC (sel 1) / RS (sel 2): read the interrupt flag, then clear /
+// set it. All three read state the differential verify can't re-derive (cc is time-varying; the
 // flag is consumed by the read), so in verify we replay the interp pass's value -- like a load.
 u64 CAlphaCPU::jit_misc(CAlphaCPU* cpu, u32 sel)
 {
@@ -1441,6 +1433,7 @@ u64 CAlphaCPU::jit_misc(CAlphaCPU* cpu, u32 sel)
 	switch (sel)
 	{
 	case 0:                                            // RPCC: Ra = cc_offset : cc[31:0]
+		cpu->sync_cc_wallclock();                      // live read: no stale batch-start cc (NetBSD PCC timecounter)
 		return ((u64)cpu->state.cc_offset << 32) | (cpu->state.cc & U64(0xffffffff));
 	case 1:                                            // RC: Ra = bIntrFlag; bIntrFlag = false
 	{
@@ -2132,16 +2125,7 @@ void CAlphaCPU::execute()
 		// old per-instruction advance ran at cc_per_instruction rate, which lags real
 		// time while the check_state feedback converges; SRM's cycles-per-tick speed
 		// calibration measured that lag consistently and locked in a low CPU speed.
-		if (cc_last_sync > now)
-			cc_last_sync = now;
-		auto cc_delta = now - cc_last_sync;
-		cc_last_sync = now;
-		if (state.cc_ena)
-		{
-			if (cc_delta > std::chrono::seconds(1))
-				cc_delta = std::chrono::seconds(1);
-			state.cc += (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(cc_delta).count() * cpu_hz / 1000000000ULL;
-		}
+		sync_cc_wallclock();
 
 		// Poll the wall-clock Cchip interval timer once per execute() batch
 		// (~512 instructions) rather than every 32;
