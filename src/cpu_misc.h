@@ -322,6 +322,10 @@
     }                                                                  \
     else                                                               \
     {                                                                  \
+      /* Non-VMS (OSF) PALcode implements WTINT itself: nap the host   \
+       * thread first, then vector to the ROM unchanged. */            \
+      if(function == 0x3e)                                             \
+        idle_nap();                                                    \
       ENTER_NATIVE_CALL_PAL();                                         \
     }                                                                  \
   }

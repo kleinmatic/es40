@@ -257,6 +257,7 @@ public:
   virtual int   SaveState(FILE* f);
   virtual int   RestoreState(FILE* f);
   void          irq_h(int number, bool assert, int delay);
+  void          idle_nap();
   int           get_cpuid();
   void          flush_icache();
 
@@ -450,6 +451,9 @@ private:
   // catch-up so backlog repays at no more than 2x the nominal rate.
   std::chrono::steady_clock::time_point next_timer_fire;
   std::chrono::steady_clock::time_point tick_last_fire;
+
+  // One-shot announcement that this CPU's idle loop reached idle_nap().
+  bool                                  idle_announced = false;
 
   // WTINT instrumentation. wtint_count totals every natively-completed
   // CALL_PAL WTINT; the first few are logged with their PC so a load-time

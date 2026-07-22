@@ -660,15 +660,20 @@ void CAlphaCPU::vmspal_call_mtpr_datfx()
  *
  * Semantics (Alpha ARM, VMS/OSF common PAL): stall the CPU until an interrupt
  * may be deliverable, then return in R0 the number of interval-clock ticks
- * skipped while stalled.  This completes immediate-return: returning without
- * a stall is architecturally valid (zero ticks skipped, R0 = 0).  The actual
- * host-thread idle sleep is added on top of this in a separate change.
+ * skipped while stalled.  idle_nap() sleeps the host thread but -- on CPU 0,
+ * which drives the wall-clock Cchip interval tick -- never past
+ * next_timer_fire, and the tick schedule is count-preserving with catch-up.
+ * No tick is ever skipped, so R0 = 0 is the true answer, not just the
+ * architecturally-permitted minimum.
  *
  * Privilege: the caller-mode check lives in DO_CALL_PAL (function < 0x40 with
  * state.cm != 0 traps OPCDEC before dispatch reaches this helper), same as
  * every other privileged PAL function.  PC: the interpreter advanced state.pc
  * past the CALL_PAL before decode, so like the other direct completions this
- * helper must not touch it.
+ * helper must not touch it.  Interrupt dispatch: the interpreter's step top
+ * and jit_run's dispatch gates both refuse compiled code while
+ * check_int/check_timers is pending, so an interrupt arriving during the nap
+ * is serviced before any further guest code runs.
  **/
 void CAlphaCPU::vmspal_call_wtint()
 {
@@ -688,6 +693,7 @@ void CAlphaCPU::vmspal_call_wtint()
 		fflush(stdout);
 	}
 
+	idle_nap();
 	r0 = 0;
 }
 

@@ -356,6 +356,7 @@
 #if defined(_M_X64) || defined(__x86_64__)
 #include <xmmintrin.h>   // _mm_setcsr: pin host MXCSR for the JIT SSE FP path
 #endif
+#include <thread>        // std::this_thread::sleep_for (idle_nap)
 
 void CAlphaCPU::release_threads()
 {
@@ -422,6 +423,61 @@ void CAlphaCPU::run()
 		printf("Exception in CPU thread: %s.\n", e.displayText().c_str());
 
 		// Let the thread die...
+	}
+}
+
+/**
+ * Host-side idle nap: sleep this CPU's host thread until an interrupt may be
+ * deliverable, instead of spinning while the guest is idle.
+ *
+ * Caller: CALL_PAL WTINT (0x3E).  The guest's idle loop (Tru64's idle thread,
+ * or OpenVMS with the SRI idle driver) issues WTINT -- "wait for interrupt".
+ * Under VMS PALcode this is completed natively (vmspal_call_wtint(): nap
+ * here, R0=0, no ROM vector -- the ROM has no 0x3e handler and would
+ * OPCDEC).  Under OSF PALcode the ROM implements WTINT, so DO_CALL_PAL
+ * naps here first and then vectors to the ROM unchanged.
+ *
+ * Nothing guest-visible is altered: wall-clock time passes during the nap
+ * exactly as on real silicon (RPCC and the interval timer are both
+ * wall-clock-paced, and jit_run() fires any due tick as soon as the nap ends).
+ *
+ * Wake conditions:
+ *  - state.check_int / state.check_timers -- raised cross-thread by irq_h()
+ *    for immediate and delayed interrupt assertion respectively.  Polled at
+ *    100us granularity, which bounds added interrupt latency at ~one poll
+ *    step (vs. the guest's own multi-ms interval-timer period).
+ *  - CPU0 only: next_timer_fire.  CPU0's own dispatch loop drives the
+ *    wall-clock Cchip interval timer, so it must never sleep past the next
+ *    scheduled fire -- no other thread would fire the tick.
+ *  - StopThread / system reset, so shutdown never blocks on an idle guest.
+ *  - The nap is capped at 1ms so the CPU stays responsive to state it does
+ *    not poll here (e.g. wait_for_start reset interactions).
+ **/
+void CAlphaCPU::idle_nap()
+{
+	using namespace std::chrono;
+
+	if (!idle_announced)
+	{
+		idle_announced = true;
+		printf("*** CPU%d *** idle nap engaged ***\n", get_cpuid());
+		fflush(stdout);   // stdout is block-buffered when captured by a service manager
+	}
+
+	auto deadline = steady_clock::now() + milliseconds(1);
+	if (state.iProcNum == 0 && next_timer_fire < deadline)
+		deadline = next_timer_fire;
+
+	while (!state.check_int && !state.check_timers && !StopThread
+		   && !(cSystem && cSystem->IsSystemResetRequested()))
+	{
+		const auto now = steady_clock::now();
+		if (now >= deadline)
+			break;
+		auto nap = deadline - now;
+		if (nap > microseconds(100))
+			nap = microseconds(100);
+		std::this_thread::sleep_for(nap);
 	}
 }
 
