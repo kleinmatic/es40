@@ -1239,7 +1239,7 @@ void CAliM1543C::toy_write(u32 address, u8 data)
 			//#
 			// The SRM-init value of 0x26 means:
 			//  xtal speed 32.768KHz  (standard)
-			//  periodic interrupt rate divisor of 32 = interrupt every 976.562 ms (1024Hz clock)
+			//  periodic interrupt rate divisor of 32 = interrupt every 976.562 µs (1024Hz clock)
 			 
 			 
 			
