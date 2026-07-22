@@ -1289,30 +1289,40 @@ void CAliM1543C::toy_write(u32 address, u8 data)
 			/*
 			  See sys/dev/ic/mc146818reg.h and sys/arch/alpha/alpha/mcclock.c in NetBSD
 			*/
-			static clock_t last_fire = 0;
-			clock_t now = clock();
-			double  timedelta = (now - last_fire) / (double)CLOCKS_PER_SEC;
-			int     rate_pow = state.toy_stored_data[0x0a] & 0x0f;
-			double  period = (1 << rate_pow) / 65536.0;
 #define MC_BASE_32_KHz  0x20
 #define RTC_PF 0x40
-
+			// Wall-exact, count-preserving periodic flag: PF sets exactly once per elapsed
+			// rate period, from an analytic fires-due count against a fixed epoch, so a fast
+			// poller sees the true cadence (976.5625us at the SRM-programmed 1024Hz). 
+			const int rate_pow = state.toy_stored_data[0x0a] & 0x0f;
+			u64 pf_freq = rate_pow ? (65536ull >> rate_pow) : 0;
 			if (state.toy_stored_data[0x0a] & MC_BASE_32_KHz)
 			{
 				if (rate_pow == 0x1)
-				{
-					period = 1 / 256.0;
-				}
+					pf_freq = 256;
 				else if (rate_pow == 0x2)
-				{
-					period = 1 / 128.0;
-				}
+					pf_freq = 128;
 			}
-
-			if (rate_pow && (timedelta >= period))
+			if (pf_freq)
 			{
-				state.toy_stored_data[0x0c] |= RTC_PF;
-				last_fire = now;
+				const auto now = std::chrono::steady_clock::now();
+				if (pf_freq != m_toy_pf_freq)
+				{
+					// Rate change (or first use): restart the divider chain from now.
+					m_toy_pf_freq = pf_freq;
+					m_toy_pf_epoch = now;
+					m_toy_pf_count = 0;
+				}
+				const u64 elapsed_ns = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+					now - m_toy_pf_epoch).count();
+				const u64 due = elapsed_ns * pf_freq / 1000000000ull;
+				if (due != m_toy_pf_count)
+				{
+					// One or more periods elapsed since the last consumed tick; PF is a
+					// flag, so a slow poller correctly coalesces missed periods into one.
+					state.toy_stored_data[0x0c] |= RTC_PF;
+					m_toy_pf_count = due;
+				}
 			}
 		}
 

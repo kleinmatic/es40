@@ -214,6 +214,11 @@ private:
   std::chrono::steady_clock::time_point m_pit_epoch[3];
   u64       m_pit_acc;
 
+  // Wall-clock RTC periodic-flag (reg C PF) pacing, re-primed on rate change 
+  std::chrono::steady_clock::time_point m_toy_pf_epoch;
+  u64       m_toy_pf_count = 0;
+  u64       m_toy_pf_freq = 0;
+
 public:
   // Period in ns of the MC146818 SQW output (rate from TOY reg A).
   // CPU thread reads this every batch boundary to pace b_irq<2>.
