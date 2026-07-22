@@ -398,6 +398,7 @@ private:
   void            vmspal_call_mfpr_astsr();
   void            vmspal_call_mfpr_vptb();
   void            vmspal_call_mtpr_datfx();
+  void            vmspal_call_wtint();
   void            vmspal_call_mfpr_whami();
   void            vmspal_call_imb();
   void            vmspal_call_prober();
@@ -449,6 +450,13 @@ private:
   // catch-up so backlog repays at no more than 2x the nominal rate.
   std::chrono::steady_clock::time_point next_timer_fire;
   std::chrono::steady_clock::time_point tick_last_fire;
+
+  // WTINT instrumentation. wtint_count totals every natively-completed
+  // CALL_PAL WTINT; the first few are logged with their PC so a load-time
+  // probe (one-shot, image-space PC) is distinguishable from the runtime
+  // idle callout (repeating, S0-space PC).
+  u64                                   wtint_count = 0;
+  int                                   wtint_logged = 0;
 
   // Wall-clock RPCC: state.cc advances by real elapsed time * cpu_hz so it tracks the configured
   // CPU frequency regardless of how fast/bursty the JIT runs. This is the last sync timestamp;

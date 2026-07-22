@@ -263,6 +263,7 @@ SafeOp classify(uint32_t ins, bool pal_block)
       break;
     case 0x00: {                // CALL_PAL: compile valid standard funcs (priv 0x00-0x3f, unpriv 0x80-0xbf)
       const uint32_t fn = ins & 0x1FFFFFFF;
+      if (fn == 0x3E) break;    // WTINT: interpret -> DO_CALL_PAL completes it natively (vmspal_call_wtint)
       if (fn <= 0x3F || (fn >= 0x80 && fn <= 0xBF)) return OP_CALL_PAL;
       break;                    // SRM specials (0x1234xx) / invalid ranges -> interpret
     }

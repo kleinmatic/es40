@@ -265,6 +265,13 @@
         vmspal_call_mtpr_datfx();                                      \
         break;                                                         \
                                                                 \
+      case 0x3e:  /* WTINT: complete natively -- the ROM PALcode has   \
+                   * no 0x3e handler and would OPCDEC (see             \
+                   * vmspal_call_wtint). Kernel-mode by the check      \
+                   * above. */                                         \
+        vmspal_call_wtint();                                           \
+        break;                                                         \
+                                                                \
       case 0x3f:  /* MFPR_WHAMI */                                     \
         vmspal_call_mfpr_whami();                                      \
         break;                                                         \
