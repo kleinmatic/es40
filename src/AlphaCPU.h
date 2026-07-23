@@ -258,6 +258,7 @@ public:
   virtual int   SaveState(FILE* f);
   virtual int   RestoreState(FILE* f);
   void          irq_h(int number, bool assert, int delay);
+  void          idle_nap();
   int           get_cpuid();
   void          flush_icache();
 
@@ -399,6 +400,7 @@ private:
   void            vmspal_call_mfpr_astsr();
   void            vmspal_call_mfpr_vptb();
   void            vmspal_call_mtpr_datfx();
+  void            vmspal_call_wtint();
   void            vmspal_call_mfpr_whami();
   void            vmspal_call_imb();
   void            vmspal_call_prober();
@@ -450,6 +452,10 @@ private:
   // catch-up so backlog repays at no more than 2x the nominal rate.
   std::chrono::steady_clock::time_point next_timer_fire;
   std::chrono::steady_clock::time_point tick_last_fire;
+
+  // CALL_PAL WTINT idle nap: enabled by the cpu config, announced once
+  bool                                  idle_nap_enabled = false;
+  bool                                  idle_announced = false;
 
   // Wall-clock RPCC: state.cc advances by real elapsed time * cpu_hz so it tracks the configured
   // CPU frequency regardless of how fast/bursty the JIT runs. This is the last sync timestamp;

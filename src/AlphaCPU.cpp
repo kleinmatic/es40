@@ -356,6 +356,7 @@
 #if defined(_M_X64) || defined(__x86_64__)
 #include <xmmintrin.h>   // _mm_setcsr: pin host MXCSR for the JIT SSE FP path
 #endif
+#include <thread>        // std::this_thread::sleep_for (idle_nap)
 
 void CAlphaCPU::release_threads()
 {
@@ -426,6 +427,56 @@ void CAlphaCPU::run()
 }
 
 /**
+ * idle_nap: sleep the cpu thread while the guest idles.  
+ * HIGHLY EXPERIMENTAL
+ * Should be mostly-safe on Linux, but still can oversleep in various edge cases.
+ * Cchip timer is only checked before entering JIT loop, same with interpreter. 
+ * so 'never sleeps past next_timer_fire' below is not guaranteed on any platform.
+ * Various other guest-configurable aspects can also change these timelines
+ * IPIs could be delayed in response from CPU0. This may or may not trigger
+ * guest timeouts
+ * FreeBSD is probably the safest host platform this code can run on. 
+ * CPU0 DOES NOT IMMEDIATELY SERIVCE THE TIMER AFTER THE NAP
+ *
+ * Intended operation of this function: 
+ * Wakes on pending interrupt/timer, StopThread, or reset (100us poll, 1ms cap); 
+ * CPU0 never sleeps past next_timer_fire, since its own loop fires the interval
+ * tick.  No-op unless idle_nap = true in the cpu config, and on MP configs
+ * (no cross-thread IPI wakeup here -- WTINT just returns immediately).
+ **/
+void CAlphaCPU::idle_nap()
+{
+	using namespace std::chrono;
+
+	if (!idle_nap_enabled || (cSystem && cSystem->get_cpu_num() > 1))
+		return;
+
+	if (!idle_announced)
+	{
+		idle_announced = true;
+		printf("*** CPU%d *** idle nap engaged ***\n", get_cpuid());
+		fflush(stdout);   // stdout is block-buffered when captured by a service manager
+	}
+
+	
+	auto deadline = steady_clock::now() + milliseconds(1);
+	if (state.iProcNum == 0 && next_timer_fire < deadline)
+		deadline = next_timer_fire;
+
+	while (!state.check_int && !state.check_timers && !StopThread
+		   && !(cSystem && cSystem->IsSystemResetRequested()))
+	{
+		const auto now = steady_clock::now();
+		if (now >= deadline)
+			break;
+		auto nap = deadline - now;
+		if (nap > microseconds(100))
+			nap = microseconds(100);
+		std::this_thread::sleep_for(nap);
+	}
+}
+
+/**
  * Constructor.
  **/
 CAlphaCPU::CAlphaCPU(CConfigurator* cfg, CSystem* system) : CSystemComponent(cfg, system), mySemaphore(0, 1)
@@ -440,6 +491,7 @@ void CAlphaCPU::init()
 	last_dtb_virt[0] = last_dtb_virt[1] = 0;
 
 	cpu_hz = myCfg->get_num_value("speed", true, 500000000);
+	idle_nap_enabled = myCfg->get_bool_value("idle_nap", false);
 #ifdef ES40_JIT
 	// With the JIT, PALcode runs natively (compiled like any other guest code) rather than being
 	// shortcut by the high-level vmspal routines, so the replacement is force-disabled
@@ -548,6 +600,7 @@ void CAlphaCPU::ResetForSystemReset()
 	state.iProcNum = savedProcNum;
 
 	cpu_hz = myCfg->get_num_value("speed", true, 500000000);
+	idle_nap_enabled = myCfg->get_bool_value("idle_nap", false);
 
 	state.wait_for_start = (state.iProcNum == 0) ? false : true;
 	icache_enabled = true;

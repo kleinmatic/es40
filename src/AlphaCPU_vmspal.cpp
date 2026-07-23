@@ -649,6 +649,18 @@ void CAlphaCPU::vmspal_call_mtpr_datfx()
 }
 
 /**
+ * Implementation of CALL_PAL WTINT opcode.
+ *
+ * Not a real VMS PALcode routine, but documented in Alpha Architecture Reference Manual
+ * Utilized by SRI's SYS$IDLE driver as an example
+ **/
+void CAlphaCPU::vmspal_call_wtint()
+{
+	idle_nap();
+	r0 = 0;
+}
+
+/**
  * Implementation of CALL_PAL MFPR_WHAMI opcode.
  **/
 void CAlphaCPU::vmspal_call_mfpr_whami()
