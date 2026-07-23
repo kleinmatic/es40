@@ -452,8 +452,7 @@ private:
   std::chrono::steady_clock::time_point next_timer_fire;
   std::chrono::steady_clock::time_point tick_last_fire;
 
-  // CALL_PAL WTINT idle handling: off unless the cpu config sets
-  // idle_nap = true.  idle_announced makes the first nap log once.
+  // CALL_PAL WTINT idle nap: enabled by the cpu config, announced once
   bool                                  idle_nap_enabled = false;
   bool                                  idle_announced = false;
 

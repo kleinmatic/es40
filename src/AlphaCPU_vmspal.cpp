@@ -649,15 +649,10 @@ void CAlphaCPU::vmspal_call_mtpr_datfx()
 }
 
 /**
- * Implementation of CALL_PAL WTINT opcode (function 0x3E, "wait for interrupt").
- *
- * The SRM ROM's VMS PALcode has no 0x3E handler, so vectoring there raises
- * OPCDEC in the guest -- the exact fault the SRI/CHARON SYS$IDLE driver
- * probes for at load time.  Completing it natively is what lets that driver
- * load, and with it the guest idle.  R0 (ticks skipped while stalled) is 0
- * truthfully: idle_nap() never sleeps CPU0 past next_timer_fire and the tick
- * schedule is count-preserving, so no tick is ever skipped.  PC was already
- * advanced past the CALL_PAL; leave it alone.
+ * CALL_PAL WTINT (0x3E): the SRM ROM's VMS PALcode has no 0x3E handler and
+ * OPCDECs -- the exact fault the SRI SYS$IDLE driver probes for -- so
+ * complete it natively.  R0 = 0 is truthful: the tick schedule is
+ * count-preserving, no tick is skipped during the nap.  PC already advanced.
  **/
 void CAlphaCPU::vmspal_call_wtint()
 {

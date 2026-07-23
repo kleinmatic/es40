@@ -427,15 +427,11 @@ void CAlphaCPU::run()
 }
 
 /**
- * CALL_PAL WTINT: sleep the host thread while the guest idles, instead of
- * spinning.  Guest-visible time is unaffected -- RPCC and the interval timer
- * are wall-clock-paced.  Wakes when an interrupt/timer is pending (polled at
- * 100us) or on StopThread/reset, and is capped at 1ms; CPU0 additionally
- * never sleeps past next_timer_fire, because its own dispatch loop is what
- * fires the interval tick.  No-op unless the cpu config sets idle_nap = true,
- * and on multiprocessor configs regardless (waking a napping sibling CPU
- * needs cross-thread IPI wakeup this change does not attempt; WTINT still
- * completes correctly, it just returns immediately).
+ * CALL_PAL WTINT: sleep the host thread while the guest idles.  Wakes on
+ * pending interrupt/timer, StopThread, or reset (100us poll, 1ms cap); CPU0
+ * never sleeps past next_timer_fire, since its own loop fires the interval
+ * tick.  No-op unless idle_nap = true in the cpu config, and on MP configs
+ * (no cross-thread IPI wakeup here -- WTINT just returns immediately).
  **/
 void CAlphaCPU::idle_nap()
 {

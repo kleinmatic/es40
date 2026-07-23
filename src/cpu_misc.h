@@ -108,10 +108,8 @@
     if((function == 0x3e) && idle_nap_enabled                          \
        && (state.pal_base == U64(0x8000)))                             \
     {                                                                  \
-      /* WTINT under VMS PALcode: complete natively -- the ROM has no  \
-       * 0x3e handler and would OPCDEC.  Keyed on PAL_BASE rather than \
-       * pal_vms because the JIT forces pal_vms false.  Off unless the \
-       * cpu config sets idle_nap = true. */                           \
+      /* WTINT before the VMS vs native PAL decision, to accommodate   \
+       * the WTINT usage scenario under JIT */                         \
       vmspal_call_wtint();                                             \
     }                                                                  \
     else if(state.pal_vms)                                             \
@@ -324,9 +322,7 @@
     }                                                                  \
     else                                                               \
     {                                                                  \
-      /* Non-VMS PALcode implements WTINT itself: nap first (no-op     \
-       * unless enabled), then vector to the ROM unchanged. */         \
-      if(function == 0x3e)                                             \
+      if(function == 0x3e) /* Non-VMS WTINT implementation */          \
         idle_nap();                                                    \
       ENTER_NATIVE_CALL_PAL();                                         \
     }                                                                  \
