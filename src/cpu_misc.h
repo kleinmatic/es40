@@ -39,7 +39,7 @@
   *
   * X-1.10       Camiel Vanderhoeven                             30-JAN-2008
   *      Always use set_pc or add_pc to change the program counter.
-  *
+  *  
   * X-1.9        Camiel Vanderhoeven                             30-JAN-2008
   *      Remember number of instructions left in current memory page, so
   *      that the translation-buffer doens't need to be consulted on every
@@ -322,9 +322,11 @@
     }                                                                  \
     else                                                               \
     {                                                                  \
-      if(function == 0x3e) /* Non-VMS WTINT implementation */          \
+      if(function == 0x3e) { /* Non-VMS WTINT implementation */        \
         idle_nap();                                                    \
+      } else { /* all other native PAL calls */                        \
       ENTER_NATIVE_CALL_PAL();                                         \
+      }                                                                \
     }                                                                  \
   }
 
