@@ -427,9 +427,20 @@ void CAlphaCPU::run()
 }
 
 /**
- * CALL_PAL WTINT: sleep the host thread while the guest idles.  Wakes on
- * pending interrupt/timer, StopThread, or reset (100us poll, 1ms cap); CPU0
- * never sleeps past next_timer_fire, since its own loop fires the interval
+ * idle_nap: sleep the cpu thread while the guest idles.  
+ * HIGHLY EXPERIMENTAL
+ * Should be mostly-safe on Linux, but still can oversleep in various edge cases.
+ * Cchip timer is only checked before entering JIT loop, same with interpreter. 
+ * so 'never sleeps past next_timer_fire' below is not guaranteed on any platform.
+ * Various other guest-configurable aspects can also change these timelines
+ * IPIs could be delayed in response from CPU0. This may or may not trigger
+ * guest timeouts
+ * FreeBSD is probably the safest host platform this code can run on. 
+ * CPU0 DOES NOT IMMEDIATELY SERIVCE THE TIMER AFTER THE NAP
+ *
+ * Intended operation of this function: 
+ * Wakes on pending interrupt/timer, StopThread, or reset (100us poll, 1ms cap); 
+ * CPU0 never sleeps past next_timer_fire, since its own loop fires the interval
  * tick.  No-op unless idle_nap = true in the cpu config, and on MP configs
  * (no cross-thread IPI wakeup here -- WTINT just returns immediately).
  **/
@@ -447,6 +458,7 @@ void CAlphaCPU::idle_nap()
 		fflush(stdout);   // stdout is block-buffered when captured by a service manager
 	}
 
+	
 	auto deadline = steady_clock::now() + milliseconds(1);
 	if (state.iProcNum == 0 && next_timer_fire < deadline)
 		deadline = next_timer_fire;
