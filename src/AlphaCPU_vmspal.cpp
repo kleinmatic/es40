@@ -649,10 +649,10 @@ void CAlphaCPU::vmspal_call_mtpr_datfx()
 }
 
 /**
- * CALL_PAL WTINT (0x3E): the SRM ROM's VMS PALcode has no 0x3E handler and
- * OPCDECs -- the exact fault the SRI SYS$IDLE driver probes for -- so
- * complete it natively.  R0 = 0 is truthful: the tick schedule is
- * count-preserving, no tick is skipped during the nap.  PC already advanced.
+ * Implementation of CALL_PAL WTINT opcode.
+ *
+ * Not a real VMS PALcode routine, but documented in Alpha Architecture Reference Manual
+ * Utilized by SRI's SYS$IDLE driver as an example
  **/
 void CAlphaCPU::vmspal_call_wtint()
 {
