@@ -89,6 +89,14 @@ public:
 	                        bool inverse) = 0;
 
 	/**
+	 * Return a file descriptor that becomes readable when a packet is
+	 * waiting (for backends that can express one), or -1 if the backend
+	 * has no pollable handle. Used by the NIC to wake its service thread
+	 * on packet arrival instead of sleeping a fixed interval.
+	 **/
+	virtual int get_wait_fd() { return -1; }
+
+	/**
 	 * Close the backend and release any resources (file descriptors,
 	 * library handles, created interfaces, ...).
 	 **/
